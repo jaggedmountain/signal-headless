@@ -43,6 +43,8 @@ type Backend struct {
 	handler  backend.Handler
 	runCtx   context.Context
 	groupRev map[types.GroupIdentifier]uint32
+	// forbidden caches groups we are no longer a member of (HTTP 403).
+	forbidden map[types.GroupIdentifier]time.Time
 }
 
 var _ backend.Backend = (*Backend)(nil)
@@ -69,7 +71,7 @@ func New(ctx context.Context, d *db.DB, log zerolog.Logger) (*Backend, error) {
 		return nil, err
 	}
 	signalmeow.SetLogger(log.With().Str("component", "libsignal").Logger().Level(zerolog.WarnLevel))
-	b := &Backend{db: d, dev: dev, log: log, groupRev: map[types.GroupIdentifier]uint32{}}
+	b := &Backend{db: d, dev: dev, log: log, groupRev: map[types.GroupIdentifier]uint32{}, forbidden: map[types.GroupIdentifier]time.Time{}}
 	b.cli = signalmeow.NewClient(dev, log.With().Str("component", "signalmeow").Logger(), b.onEvent)
 	b.cli.SyncContactsOnConnect = true
 	if n, err := b.pruneDeadSessions(ctx); err != nil {
@@ -598,7 +600,9 @@ func (b *Backend) Groups(ctx context.Context) ([]model.GroupInfo, error) {
 	out := make([]model.GroupInfo, 0, len(ids))
 	for _, id := range ids {
 		g, err := b.group(ctx, id)
-		if err != nil {
+		if errors.Is(err, errNotMember) {
+			continue
+		} else if err != nil {
 			b.log.Debug().Err(err).Stringer("group", id).Msg("Group lookup failed")
 			out = append(out, model.GroupInfo{ID: model.ThreadID(id)})
 			continue
@@ -612,13 +616,25 @@ func (b *Backend) Groups(ctx context.Context) ([]model.GroupInfo, error) {
 	return out, nil
 }
 
+var errNotMember = errors.New("not a member of this group")
+
 func (b *Backend) group(ctx context.Context, id types.GroupIdentifier) (*signalmeow.Group, error) {
 	b.mu.Lock()
 	rev := b.groupRev[id]
+	if t, ok := b.forbidden[id]; ok && time.Since(t) < time.Hour && rev == 0 {
+		b.mu.Unlock()
+		return nil, errNotMember
+	}
 	b.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	g, _, err := b.cli.RetrieveGroupByID(ctx, id, rev)
+	if err != nil && strings.Contains(err.Error(), "status: 403") {
+		b.mu.Lock()
+		b.forbidden[id] = time.Now()
+		b.mu.Unlock()
+		return nil, errNotMember
+	}
 	return g, err
 }
 
