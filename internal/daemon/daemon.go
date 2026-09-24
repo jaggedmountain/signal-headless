@@ -457,13 +457,14 @@ func hasPending(m *model.Message) bool {
 	return false
 }
 
-// attachmentName builds a unique, readable file name: <ts>-<idx>-<name>.
+// attachmentName builds a unique, readable file name:
+// <ts>-<message row id>-<index>-<name>.
 func attachmentName(p history.PendingAttachment) string {
 	name := sanitize(p.Filename)
 	if name == "" {
 		name = "attachment" + extFor(p.ContentType)
 	}
-	return fmt.Sprintf("%d-%d-%s", p.TS, p.Index, name)
+	return fmt.Sprintf("%d-%d-%d-%s", p.TS, p.MessageID, p.Index, name)
 }
 
 func sanitize(name string) string {
@@ -764,6 +765,8 @@ func (d *Daemon) Send(ctx context.Context, out model.Outgoing) (*model.Message, 
 	if sendErr != nil {
 		status = model.StatusFailed
 		d.log.Warn().Err(sendErr).Str("thread", string(out.Thread)).Msg("Send failed")
+	} else {
+		d.log.Info().Str("thread", string(out.Thread)).Int("attachments", len(out.Attachments)).Msg("Sent")
 	}
 	// A receipt may already have advanced the status; only move forward.
 	if cur, err := d.hist.Message(ctx, m.ID); err == nil && (status == model.StatusFailed || status.Rank() > cur.Status.Rank()) {

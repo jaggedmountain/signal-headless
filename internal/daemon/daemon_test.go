@@ -163,7 +163,7 @@ func TestCompatAttachmentWaitsForDownload(t *testing.T) {
 	}
 	json.Unmarshal(next(t, c, rpc.EvReceive), &got)
 	atts := got.Envelope.SyncMessage.SentMessage.Attachments
-	if len(atts) != 1 || atts[0].ID != "42-0-evil name.txt" {
+	if len(atts) != 1 || atts[0].ID != "42-1-0-evil name.txt" {
 		t.Fatalf("attachments = %+v", atts)
 	}
 	b, err := os.ReadFile(filepath.Join(e.dir, "attachments", atts[0].ID))
