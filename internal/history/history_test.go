@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -136,5 +137,33 @@ func TestReadSync(t *testing.T) {
 	}
 	if thr, _ := s.Thread(ctx, th); thr.Unread != 1 {
 		t.Fatalf("unread = %d, want 1", thr.Unread)
+	}
+}
+
+func TestDisappearing(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	th := model.ThreadID("dave")
+	s.EnsureThread(ctx, th, model.Direct, "")
+	if err := s.SetTimer(ctx, th, 60, 2); err != nil {
+		t.Fatal(err)
+	}
+	s.SetTimer(ctx, th, 5, 1) // stale version: ignored
+	if sec, ver, _ := s.Timer(ctx, th); sec != 60 || ver != 2 {
+		t.Fatalf("timer = %d v%d", sec, ver)
+	}
+	s.InsertMessage(ctx, &model.Message{Thread: th, Author: "dave", TS: 10, Body: "poof", ExpiresIn: 1})
+	s.InsertMessage(ctx, &model.Message{Thread: th, Author: "me", TS: 11, Body: "mine", ExpiresIn: 1, Outgoing: true})
+	far := time.Now().Add(time.Hour).UnixMilli()
+	exp, err := s.Expired(ctx, far)
+	if err != nil || len(exp) != 1 || exp[0].TS != 11 {
+		t.Fatalf("before read, only the sent message expires: %+v %v", exp, err)
+	}
+	s.MarkThreadRead(ctx, th)
+	if exp, _ := s.Expired(ctx, far); len(exp) != 2 {
+		t.Fatalf("after read both expire: %+v", exp)
+	}
+	if exp, _ := s.Expired(ctx, time.Now().Add(-time.Minute).UnixMilli()); len(exp) != 0 {
+		t.Fatalf("nothing expires in the past: %+v", exp)
 	}
 }

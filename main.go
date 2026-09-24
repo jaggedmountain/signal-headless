@@ -102,7 +102,28 @@ func defaultDeviceName() string {
 	return "signal-headless@" + h
 }
 
+// isBridgeInvocation reports a signal-cli style "... jsonRpc" command line.
+func isBridgeInvocation(args []string) bool {
+	for _, a := range args {
+		if a == "jsonRpc" {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
+	if isBridgeInvocation(os.Args[1:]) {
+		// signal-cli flags (--config, -a) are accepted and ignored.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		o := &options{foreground: true}
+		if err := runBridge(ctx, o, paths.Resolve("", "")); err != nil {
+			fmt.Fprintln(os.Stderr, "signal-headless:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	o, err := parseFlags(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -114,7 +135,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	p := paths.Resolve(o.dataDir, o.socket)
+	p := resolvePaths(o)
 	switch {
 	case o.showVersion:
 		fmt.Println("signal-headless", version)

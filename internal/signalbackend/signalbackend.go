@@ -404,8 +404,11 @@ func (b *Backend) sendContent(ctx context.Context, thread model.ThreadID, conten
 
 func nowTS() uint64 { return uint64(time.Now().UnixMilli()) }
 
-func (b *Backend) Send(ctx context.Context, out model.Outgoing) (int64, error) {
-	ts := nowTS()
+func (b *Backend) Send(ctx context.Context, out model.Outgoing) error {
+	ts := uint64(out.TS)
+	if ts == 0 {
+		ts = nowTS()
+	}
 	dm := &signalpb.DataMessage{Timestamp: &ts}
 	if out.Body != "" {
 		dm.Body = proto.String(out.Body)
@@ -419,14 +422,14 @@ func (b *Backend) Send(ctx context.Context, out model.Outgoing) (int64, error) {
 	for _, path := range out.Attachments {
 		ptr, err := b.upload(ctx, path)
 		if err != nil {
-			return 0, fmt.Errorf("attachment %s: %w", path, err)
+			return fmt.Errorf("attachment %s: %w", path, err)
 		}
 		dm.Attachments = append(dm.Attachments, ptr)
 	}
 	if q := out.Quote; q != nil {
 		aci, err := uuid.Parse(q.Author)
 		if err != nil {
-			return 0, fmt.Errorf("quote author %q: %w", q.Author, err)
+			return fmt.Errorf("quote author %q: %w", q.Author, err)
 		}
 		dm.Quote = &signalpb.DataMessage_Quote{
 			Id:              proto.Uint64(uint64(q.TS)),
@@ -436,9 +439,9 @@ func (b *Backend) Send(ctx context.Context, out model.Outgoing) (int64, error) {
 		}
 	}
 	if dm.Body == nil && len(dm.Attachments) == 0 {
-		return 0, errors.New("empty message")
+		return errors.New("empty message")
 	}
-	return int64(ts), b.sendContent(ctx, out.Thread, signalmeow.WrapDataMessage(dm))
+	return b.sendContent(ctx, out.Thread, signalmeow.WrapDataMessage(dm))
 }
 
 func (b *Backend) upload(ctx context.Context, path string) (*signalpb.AttachmentPointer, error) {
@@ -613,11 +616,11 @@ func (b *Backend) ThreadInfo(ctx context.Context, thread model.ThreadID) (model.
 	return model.Direct, b.ContactName(ctx, sid.String()), nil
 }
 
-// ContactName looks up a display name from the local store only.
-func (b *Backend) ContactName(ctx context.Context, id string) string {
+// Contact looks up a service ID in the local store only (no network).
+func (b *Backend) Contact(ctx context.Context, id string) (model.Contact, bool) {
 	sid, err := libsignalgo.ServiceIDFromString(id)
 	if err != nil {
-		return ""
+		return model.Contact{}, false
 	}
 	var aci, pni uuid.UUID
 	if sid.Type == libsignalgo.ServiceIDTypePNI {
@@ -627,17 +630,25 @@ func (b *Backend) ContactName(ctx context.Context, id string) string {
 	}
 	r, err := b.dev.RecipientStore.LoadAndUpdateRecipient(ctx, aci, pni, nil)
 	if err != nil || r == nil {
-		return ""
+		return model.Contact{}, false
 	}
 	c := recipientToContact(r)
 	if c.ID == "" {
 		c.ID = id
 	}
-	name := c.DisplayName()
-	if name == c.ID {
+	return c, true
+}
+
+// ContactName returns a display name for id, or "" if nothing better than the ID is known.
+func (b *Backend) ContactName(ctx context.Context, id string) string {
+	c, ok := b.Contact(ctx, id)
+	if !ok {
 		return ""
 	}
-	return name
+	if name := c.DisplayName(); name != c.ID {
+		return name
+	}
+	return ""
 }
 
 func (b *Backend) ResolveRecipient(ctx context.Context, s string) (model.ThreadID, error) {

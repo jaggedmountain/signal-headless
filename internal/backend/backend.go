@@ -21,7 +21,8 @@ type Backend interface {
 	Run(ctx context.Context, h Handler) error
 	Account() model.Account
 
-	Send(ctx context.Context, out model.Outgoing) (ts int64, err error)
+	// Send delivers out using out.TS as the Signal message timestamp.
+	Send(ctx context.Context, out model.Outgoing) error
 	SendReaction(ctx context.Context, thread model.ThreadID, target model.MessageRef, emoji string, remove bool) error
 	SendDelete(ctx context.Context, thread model.ThreadID, targetTS int64) error
 	SendTyping(ctx context.Context, thread model.ThreadID, typing bool) error
@@ -32,8 +33,8 @@ type Backend interface {
 	Groups(ctx context.Context) ([]model.GroupInfo, error)
 	// ThreadInfo returns the kind and display title of a thread.
 	ThreadInfo(ctx context.Context, thread model.ThreadID) (model.ThreadKind, string, error)
-	// ContactName returns a display name for an author ID ("" if unknown).
-	ContactName(ctx context.Context, id string) string
+	// Contact returns what the local store knows about a service ID.
+	Contact(ctx context.Context, id string) (model.Contact, bool)
 	// ResolveRecipient turns user input (+E164, UUID, group ID, 'self') into a thread ID.
 	ResolveRecipient(ctx context.Context, s string) (model.ThreadID, error)
 

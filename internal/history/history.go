@@ -40,7 +40,7 @@ func (s *Store) ThreadExists(ctx context.Context, id model.ThreadID) (bool, erro
 }
 
 const threadSelect = `
-	SELECT t.id, t.kind, t.title, t.last_ts, t.archived,
+	SELECT t.id, t.kind, t.title, t.last_ts, t.archived, t.expire_timer,
 		(SELECT COUNT(*) FROM sh_message m WHERE m.thread_id = t.id AND m.outgoing = 0 AND m.read = 0 AND m.deleted = 0),
 		COALESCE((SELECT m.id FROM sh_message m WHERE m.thread_id = t.id ORDER BY m.ts DESC LIMIT 1), 0)
 	FROM sh_thread t`
@@ -52,7 +52,7 @@ func (s *Store) scanThreads(ctx context.Context, rows dbutil.Rows) ([]model.Thre
 	for rows.Next() {
 		var t model.Thread
 		var lastID int64
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Title, &t.LastTS, &t.Archived, &t.Unread, &lastID); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Title, &t.LastTS, &t.Archived, &t.ExpireTimer, &t.Unread, &lastID); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -98,6 +98,36 @@ func (s *Store) Thread(ctx context.Context, id model.ThreadID) (*model.Thread, e
 	return &ts[0], nil
 }
 
+// SetTimer records a thread's disappearing-messages timer. Older versions
+// (lower non-zero version numbers) are ignored.
+func (s *Store) SetTimer(ctx context.Context, id model.ThreadID, seconds, version uint32) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE sh_thread SET expire_timer=$2, expire_version=MAX(expire_version, $3)
+		WHERE id=$1 AND ($3 = 0 OR $3 >= expire_version)`, string(id), seconds, version)
+	return err
+}
+
+// Timer returns a thread's disappearing-messages timer and version.
+func (s *Store) Timer(ctx context.Context, id model.ThreadID) (seconds, version uint32, err error) {
+	err = s.db.QueryRow(ctx, `SELECT expire_timer, expire_version FROM sh_thread WHERE id=$1`, string(id)).Scan(&seconds, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+	}
+	return
+}
+
+// Title returns a thread's stored title ("" if unknown).
+func (s *Store) Title(ctx context.Context, id model.ThreadID) string {
+	var t string
+	_ = s.db.QueryRow(ctx, `SELECT title FROM sh_thread WHERE id=$1`, string(id)).Scan(&t)
+	return t
+}
+
+func (s *Store) SetTitle(ctx context.Context, id model.ThreadID, title string) error {
+	_, err := s.db.Exec(ctx, `UPDATE sh_thread SET title=$2 WHERE id=$1`, string(id), title)
+	return err
+}
+
 func (s *Store) SetArchived(ctx context.Context, id model.ThreadID, archived bool) error {
 	_, err := s.db.Exec(ctx, `UPDATE sh_thread SET archived=$2 WHERE id=$1`, string(id), archived)
 	return err
@@ -115,13 +145,18 @@ func (s *Store) InsertMessage(ctx context.Context, m *model.Message) (inserted b
 		if m.Quote != nil {
 			q = *m.Quote
 		}
+		read := m.Read || m.Outgoing
+		var expireStart int64
+		if m.ExpiresIn > 0 && read {
+			expireStart = m.ReceivedAt
+		}
 		res, err := s.db.Exec(ctx, `
 			INSERT INTO sh_message (thread_id, author, ts, server_ts, received_at, outgoing, read, status, body,
-				quote_author, quote_ts, quote_text, expires_in, sticker)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				quote_author, quote_ts, quote_text, expires_in, expire_start, sticker)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (thread_id, author, ts) DO NOTHING`,
-			string(m.Thread), m.Author, m.TS, m.ServerTS, m.ReceivedAt, m.Outgoing, m.Read || m.Outgoing, string(m.Status), m.Body,
-			q.Author, q.TS, q.Text, m.ExpiresIn, m.Sticker)
+			string(m.Thread), m.Author, m.TS, m.ServerTS, m.ReceivedAt, m.Outgoing, read, string(m.Status), m.Body,
+			q.Author, q.TS, q.Text, m.ExpiresIn, expireStart, m.Sticker)
 		if err != nil {
 			return err
 		}
@@ -403,6 +438,9 @@ func (s *Store) SetStatus(ctx context.Context, id int64, status model.Status) er
 	return err
 }
 
+// startTimer starts the disappearing timer ($2 = now ms) for messages that have one.
+const startTimer = `expire_start = CASE WHEN expires_in > 0 AND expire_start = 0 THEN $2 ELSE expire_start END`
+
 // MarkThreadRead marks all incoming messages in a thread read and returns the
 // ones that were unread (for sending read receipts).
 func (s *Store) MarkThreadRead(ctx context.Context, thread model.ThreadID) ([]model.MessageRef, error) {
@@ -423,7 +461,8 @@ func (s *Store) MarkThreadRead(ctx context.Context, thread model.ThreadID) ([]mo
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	_, err = s.db.Exec(ctx, `UPDATE sh_message SET read=1 WHERE thread_id=$1 AND outgoing=0 AND read=0`, string(thread))
+	_, err = s.db.Exec(ctx, `UPDATE sh_message SET read=1, `+startTimer+` WHERE thread_id=$1 AND outgoing=0 AND read=0`,
+		string(thread), time.Now().UnixMilli())
 	return refs, err
 }
 
@@ -440,7 +479,8 @@ func (s *Store) ApplyReadSync(ctx context.Context, refs []model.MessageRef) ([]m
 		} else if err != nil {
 			return nil, err
 		}
-		if _, err := s.db.Exec(ctx, `UPDATE sh_message SET read=1 WHERE thread_id=$1 AND outgoing=0 AND ts <= $2`, thread, r.TS); err != nil {
+		if _, err := s.db.Exec(ctx, `UPDATE sh_message SET read=1, `+startTimer+` WHERE thread_id=$1 AND outgoing=0 AND read=0 AND ts <= $3`,
+			thread, time.Now().UnixMilli(), r.TS); err != nil {
 			return nil, err
 		}
 		if !seen[model.ThreadID(thread)] {
@@ -484,4 +524,24 @@ func (s *Store) UpdateAttachment(ctx context.Context, messageID int64, idx int, 
 	_, err := s.db.Exec(ctx, `UPDATE sh_attachment SET state=$3, path=$4, error=$5 WHERE message_id=$1 AND idx=$2`,
 		messageID, idx, string(state), path, errMsg)
 	return err
+}
+
+// Expired returns messages whose disappearing timer has run out by now (ms).
+func (s *Store) Expired(ctx context.Context, now int64) ([]*model.Message, error) {
+	rows, err := s.db.Query(ctx, messageSelect+`
+		WHERE expires_in > 0 AND expire_start > 0 AND deleted = 0 AND expire_start + expires_in*1000 <= $1`, now)
+	if err != nil {
+		return nil, err
+	}
+	var out []*model.Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	rows.Close()
+	return out, s.fillDetails(ctx, out, false)
 }

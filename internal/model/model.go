@@ -191,6 +191,8 @@ type Outgoing struct {
 	Body        string   `json:"body"`
 	Attachments []string `json:"attachments,omitempty"` // absolute paths on the daemon host
 	Quote       *Quote   `json:"quote,omitempty"`
+	// TS is the message timestamp, chosen by the daemon.
+	TS int64 `json:"-"`
 	// Set by the daemon from the thread's disappearing-messages setting.
 	ExpireTimer   uint32 `json:"-"`
 	ExpireVersion uint32 `json:"-"`
