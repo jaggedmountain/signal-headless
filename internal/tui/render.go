@@ -59,6 +59,7 @@ func padRight(s string, w int) string {
 func (m *Model) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
+	v.ReportFocus = true
 	v.WindowTitle = m.windowTitle()
 	if m.width == 0 || m.height == 0 {
 		v.SetContent("starting…")

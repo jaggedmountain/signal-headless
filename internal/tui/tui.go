@@ -93,6 +93,9 @@ type Model struct {
 	flashAt time.Time
 	errText string
 	quit    bool
+	// blurred is set while the terminal reports it lost focus; the open
+	// thread is then not marked read (no read receipts for unseen messages).
+	blurred bool
 }
 
 type typingInfo struct {
@@ -212,7 +215,7 @@ func (m *Model) open(id model.ThreadID) tea.Cmd {
 	if !m.loaded[id] {
 		cmds = append(cmds, m.loadMessagesCmd(id, 0))
 	}
-	if t := m.thread(id); t != nil && t.Unread > 0 {
+	if t := m.thread(id); t != nil && t.Unread > 0 && !m.blurred {
 		cmds = append(cmds, m.markReadCmd(id))
 	}
 	m.layout()
@@ -302,6 +305,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
+		return m, nil
+
+	case tea.BlurMsg:
+		m.blurred = true
+		return m, nil
+
+	case tea.FocusMsg:
+		m.blurred = false
+		if t := m.thread(m.cur); t != nil && t.Unread > 0 {
+			return m, m.markReadCmd(m.cur)
+		}
 		return m, nil
 
 	case statusMsg:
@@ -492,7 +506,7 @@ func (m *Model) handleNotification(n rpc.Notification) tea.Cmd {
 		if !x.Outgoing {
 			delete(m.typing[x.Thread], x.Author)
 		}
-		if x.Thread == m.cur && !x.Outgoing {
+		if x.Thread == m.cur && !x.Outgoing && !m.blurred {
 			return m.markReadCmd(x.Thread)
 		}
 		if !x.Outgoing {
