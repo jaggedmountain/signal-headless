@@ -96,9 +96,36 @@ func runDaemon(ctx context.Context, o *options, p paths.Paths) error {
 	}
 	dmn := daemon.New(daemon.Config{Socket: p.Socket, AttachmentsDir: p.Attachments(), Version: version},
 		be, history.New(d.Database), log)
-	err = dmn.Run(ctx)
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if !o.fake {
+		go guardAgainstSignalCLI(runCtx, cancel)
+	}
+	err = dmn.Run(runCtx)
+	if cause := context.Cause(runCtx); err == nil && cause != nil && cause != context.Canceled && ctx.Err() == nil {
+		err = cause
+	}
 	log.Info().Msg("Daemon stopped")
 	return err
+}
+
+// guardAgainstSignalCLI stops the daemon if signal-cli starts: two clients
+// on one device identity split the message queue and corrupt each other's
+// sessions. (A still-enabled signal_agent.service would do this at login.)
+func guardAgainstSignalCLI(ctx context.Context, stop context.CancelCauseFunc) {
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if pids := importer.SignalCLIRunning(); len(pids) > 0 {
+				stop(fmt.Errorf("signal-cli started (pids %v); stopping to protect the shared device identity", pids))
+				return
+			}
+		}
+	}
 }
 
 // connect dials the daemon, starting it in the background if needed.

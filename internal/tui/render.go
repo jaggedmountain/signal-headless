@@ -198,6 +198,11 @@ func (m *Model) renderMain(h int) string {
 	for len(view) < paneH {
 		view = append([]string{""}, view...)
 	}
+	for i, l := range view {
+		if ansi.StringWidth(l) > w {
+			view[i] = ansi.Truncate(l, w, "")
+		}
+	}
 	if start == 0 && !m.exhausted[m.cur] && len(view) > 0 {
 		view[0] = stDim.Render(padRight("  ↑ older messages (g / k to load)", w))
 	}
@@ -256,6 +261,7 @@ func (m *Model) buildBlocks(msgs []*model.Message, w, sel int) []block {
 	for _, x := range msgs {
 		nameW = max(nameW, min(16, ansi.StringWidth(m.authorLabel(x))))
 	}
+	nameW = min(nameW, max(4, w/5)) // leave room for text in narrow panes
 	var out []block
 	var lastDay string
 	for i, x := range msgs {
@@ -326,7 +332,7 @@ func (m *Model) renderMessage(x *model.Message, w, nameW int, selected, isGroup 
 		ns = lipgloss.NewStyle().Bold(true).Foreground(colDim)
 	}
 	prefixW := 2 + 5 + 1 + nameW + 2 // mark, clock, space, name, gap
-	textW := max(10, w-prefixW)
+	textW := max(8, w-prefixW)
 	indent := strings.Repeat(" ", prefixW)
 
 	var body []string
@@ -378,7 +384,7 @@ func (m *Model) renderMessage(x *model.Message, w, nameW int, selected, isGroup 
 		if info != "" {
 			line += " " + stDim.Render("("+info+")")
 		}
-		body = append(body, truncate(line, textW+20))
+		body = append(body, truncate(line, textW))
 	}
 	if len(body) == 0 {
 		body = []string{""}
