@@ -1,0 +1,487 @@
+// Package history persists threads and messages. Signal servers keep no
+// history, so this store is the only record of a conversation.
+package history
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"go.mau.fi/util/dbutil"
+
+	"signal-headless/internal/model"
+)
+
+type Store struct {
+	db *dbutil.Database
+}
+
+func New(db *dbutil.Database) *Store { return &Store{db: db} }
+
+var ErrNotFound = errors.New("not found")
+
+// EnsureThread creates the thread if missing. A non-empty title replaces the
+// stored one.
+func (s *Store) EnsureThread(ctx context.Context, id model.ThreadID, kind model.ThreadKind, title string) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO sh_thread (id, kind, title) VALUES ($1, $2, $3)
+		ON CONFLICT (id) DO UPDATE SET title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE sh_thread.title END`,
+		string(id), string(kind), title)
+	return err
+}
+
+func (s *Store) ThreadExists(ctx context.Context, id model.ThreadID) (bool, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM sh_thread WHERE id=$1`, string(id)).Scan(&n)
+	return n > 0, err
+}
+
+const threadSelect = `
+	SELECT t.id, t.kind, t.title, t.last_ts, t.archived,
+		(SELECT COUNT(*) FROM sh_message m WHERE m.thread_id = t.id AND m.outgoing = 0 AND m.read = 0 AND m.deleted = 0),
+		COALESCE((SELECT m.id FROM sh_message m WHERE m.thread_id = t.id ORDER BY m.ts DESC LIMIT 1), 0)
+	FROM sh_thread t`
+
+func (s *Store) scanThreads(ctx context.Context, rows dbutil.Rows) ([]model.Thread, error) {
+	defer rows.Close()
+	var out []model.Thread
+	var lastIDs []int64
+	for rows.Next() {
+		var t model.Thread
+		var lastID int64
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Title, &t.LastTS, &t.Archived, &t.Unread, &lastID); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+		lastIDs = append(lastIDs, lastID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, id := range lastIDs {
+		if id == 0 {
+			continue
+		}
+		m, err := s.messageByID(ctx, id, false)
+		if err == nil {
+			out[i].LastPreview = m.Preview()
+			out[i].LastAuthor = m.Author
+		}
+	}
+	return out, nil
+}
+
+// Threads lists threads, most recently active first.
+func (s *Store) Threads(ctx context.Context) ([]model.Thread, error) {
+	rows, err := s.db.Query(ctx, threadSelect+` ORDER BY t.last_ts DESC, t.title`)
+	if err != nil {
+		return nil, err
+	}
+	return s.scanThreads(ctx, rows)
+}
+
+func (s *Store) Thread(ctx context.Context, id model.ThreadID) (*model.Thread, error) {
+	rows, err := s.db.Query(ctx, threadSelect+` WHERE t.id = $1`, string(id))
+	if err != nil {
+		return nil, err
+	}
+	ts, err := s.scanThreads(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(ts) == 0 {
+		return nil, ErrNotFound
+	}
+	return &ts[0], nil
+}
+
+func (s *Store) SetArchived(ctx context.Context, id model.ThreadID, archived bool) error {
+	_, err := s.db.Exec(ctx, `UPDATE sh_thread SET archived=$2 WHERE id=$1`, string(id), archived)
+	return err
+}
+
+// InsertMessage stores m (and its attachments). Duplicates of an existing
+// (thread, author, ts) are ignored and reported as inserted=false. The
+// thread must already exist. m.ID is set on success.
+func (s *Store) InsertMessage(ctx context.Context, m *model.Message) (inserted bool, err error) {
+	if m.ReceivedAt == 0 {
+		m.ReceivedAt = time.Now().UnixMilli()
+	}
+	err = s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		var q model.Quote
+		if m.Quote != nil {
+			q = *m.Quote
+		}
+		res, err := s.db.Exec(ctx, `
+			INSERT INTO sh_message (thread_id, author, ts, server_ts, received_at, outgoing, read, status, body,
+				quote_author, quote_ts, quote_text, expires_in, sticker)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			ON CONFLICT (thread_id, author, ts) DO NOTHING`,
+			string(m.Thread), m.Author, m.TS, m.ServerTS, m.ReceivedAt, m.Outgoing, m.Read || m.Outgoing, string(m.Status), m.Body,
+			q.Author, q.TS, q.Text, m.ExpiresIn, m.Sticker)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return s.db.QueryRow(ctx, `SELECT id FROM sh_message WHERE thread_id=$1 AND author=$2 AND ts=$3`,
+				string(m.Thread), m.Author, m.TS).Scan(&m.ID)
+		}
+		inserted = true
+		if m.ID, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		for i := range m.Attachments {
+			a := &m.Attachments[i]
+			a.Index = i
+			if a.State == "" {
+				a.State = model.AttachmentPending
+			}
+			_, err = s.db.Exec(ctx, `
+				INSERT INTO sh_attachment (message_id, idx, content_type, filename, size, path, state, error, voice_note, pointer)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+				m.ID, i, a.ContentType, a.Filename, a.Size, a.Path, string(a.State), a.Error, a.VoiceNote, a.Pointer)
+			if err != nil {
+				return err
+			}
+		}
+		_, err = s.db.Exec(ctx, `UPDATE sh_thread SET last_ts = MAX(last_ts, $2), archived = 0 WHERE id = $1`, string(m.Thread), m.TS)
+		return err
+	})
+	return inserted, err
+}
+
+const messageSelect = `
+	SELECT id, thread_id, author, ts, server_ts, received_at, outgoing, read, status, body,
+		quote_author, quote_ts, quote_text, edited_at, deleted, expires_in, sticker
+	FROM sh_message`
+
+func scanMessage(row dbutil.Scannable) (*model.Message, error) {
+	var m model.Message
+	var q model.Quote
+	err := row.Scan(&m.ID, &m.Thread, &m.Author, &m.TS, &m.ServerTS, &m.ReceivedAt, &m.Outgoing, &m.Read, &m.Status, &m.Body,
+		&q.Author, &q.TS, &q.Text, &m.EditedAt, &m.Deleted, &m.ExpiresIn, &m.Sticker)
+	if err != nil {
+		return nil, err
+	}
+	if q.TS != 0 {
+		m.Quote = &q
+	}
+	return &m, nil
+}
+
+func (s *Store) fillDetails(ctx context.Context, msgs []*model.Message, withPointers bool) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*model.Message, len(msgs))
+	ids := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		byID[m.ID] = m
+		ids = append(ids, fmt.Sprint(m.ID))
+	}
+	in := strings.Join(ids, ",")
+	rows, err := s.db.Query(ctx, `
+		SELECT message_id, idx, content_type, filename, size, path, state, error, voice_note, pointer
+		FROM sh_attachment WHERE message_id IN (`+in+`) ORDER BY message_id, idx`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var a model.Attachment
+		if err := rows.Scan(&id, &a.Index, &a.ContentType, &a.Filename, &a.Size, &a.Path, &a.State, &a.Error, &a.VoiceNote, &a.Pointer); err != nil {
+			rows.Close()
+			return err
+		}
+		if !withPointers {
+			a.Pointer = nil
+		}
+		byID[id].Attachments = append(byID[id].Attachments, a)
+	}
+	rows.Close()
+	rows, err = s.db.Query(ctx, `SELECT message_id, reactor, emoji, ts FROM sh_reaction WHERE message_id IN (`+in+`) ORDER BY ts`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var r model.Reaction
+		if err := rows.Scan(&id, &r.Reactor, &r.Emoji, &r.TS); err != nil {
+			return err
+		}
+		byID[id].Reactions = append(byID[id].Reactions, r)
+	}
+	return rows.Err()
+}
+
+func (s *Store) messageByID(ctx context.Context, id int64, withPointers bool) (*model.Message, error) {
+	m, err := scanMessage(s.db.QueryRow(ctx, messageSelect+` WHERE id=$1`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	return m, s.fillDetails(ctx, []*model.Message{m}, withPointers)
+}
+
+// Message returns a message by row ID, including attachments and reactions.
+func (s *Store) Message(ctx context.Context, id int64) (*model.Message, error) {
+	return s.messageByID(ctx, id, false)
+}
+
+// MessageByRef finds a message by Signal identity. thread may be empty.
+func (s *Store) MessageByRef(ctx context.Context, thread model.ThreadID, ref model.MessageRef) (*model.Message, error) {
+	var row *sql.Row
+	if thread != "" {
+		row = s.db.QueryRow(ctx, messageSelect+` WHERE thread_id=$1 AND author=$2 AND ts=$3`, string(thread), ref.Author, ref.TS)
+	} else {
+		row = s.db.QueryRow(ctx, messageSelect+` WHERE author=$1 AND ts=$2 LIMIT 1`, ref.Author, ref.TS)
+	}
+	m, err := scanMessage(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	return m, s.fillDetails(ctx, []*model.Message{m}, false)
+}
+
+// Messages returns up to limit messages of a thread older than beforeTS
+// (0 = newest), in chronological order.
+func (s *Store) Messages(ctx context.Context, thread model.ThreadID, beforeTS int64, limit int) ([]*model.Message, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if beforeTS <= 0 {
+		beforeTS = 1<<62 - 1
+	}
+	rows, err := s.db.Query(ctx, messageSelect+` WHERE thread_id=$1 AND ts < $2 ORDER BY ts DESC LIMIT $3`,
+		string(thread), beforeTS, limit)
+	if err != nil {
+		return nil, err
+	}
+	var out []*model.Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	rows.Close()
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, s.fillDetails(ctx, out, false)
+}
+
+// Search finds messages whose body contains query (case-insensitive), newest first.
+func (s *Store) Search(ctx context.Context, thread model.ThreadID, query string, limit int) ([]*model.Message, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query) + "%"
+	q := messageSelect + ` WHERE body LIKE $1 ESCAPE '\' AND deleted = 0`
+	args := []any{like}
+	if thread != "" {
+		q += ` AND thread_id = $2`
+		args = append(args, string(thread))
+	}
+	q += fmt.Sprintf(` ORDER BY ts DESC LIMIT %d`, limit)
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	var out []*model.Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	rows.Close()
+	return out, s.fillDetails(ctx, out, false)
+}
+
+// ApplyEdit updates the body of a message. Returns ErrNotFound if unknown.
+func (s *Store) ApplyEdit(ctx context.Context, thread model.ThreadID, author string, targetTS, editTS int64, body string) (*model.Message, error) {
+	res, err := s.db.Exec(ctx, `UPDATE sh_message SET body=$4, edited_at=$5 WHERE thread_id=$1 AND author=$2 AND ts=$3`,
+		string(thread), author, targetTS, body, editTS)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return s.MessageByRef(ctx, thread, model.MessageRef{Author: author, TS: targetTS})
+}
+
+// ApplyDelete marks a message deleted and drops its body and attachments' metadata.
+func (s *Store) ApplyDelete(ctx context.Context, thread model.ThreadID, author string, targetTS int64) (*model.Message, error) {
+	m, err := s.MessageByRef(ctx, thread, model.MessageRef{Author: author, TS: targetTS})
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		if _, err := s.db.Exec(ctx, `UPDATE sh_message SET deleted=1, body='', quote_text='' WHERE id=$1`, m.ID); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(ctx, `DELETE FROM sh_reaction WHERE message_id=$1`, m.ID); err != nil {
+			return err
+		}
+		_, err := s.db.Exec(ctx, `DELETE FROM sh_attachment WHERE message_id=$1`, m.ID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.Message(ctx, m.ID)
+}
+
+// ApplyReaction sets or removes reactor's reaction on the target message.
+func (s *Store) ApplyReaction(ctx context.Context, thread model.ThreadID, target model.MessageRef, reactor, emoji string, remove bool, ts int64) (*model.Message, error) {
+	m, err := s.MessageByRef(ctx, thread, target)
+	if err != nil {
+		return nil, err
+	}
+	if remove {
+		_, err = s.db.Exec(ctx, `DELETE FROM sh_reaction WHERE message_id=$1 AND reactor=$2`, m.ID, reactor)
+	} else {
+		_, err = s.db.Exec(ctx, `
+			INSERT INTO sh_reaction (message_id, reactor, emoji, ts) VALUES ($1, $2, $3, $4)
+			ON CONFLICT (message_id, reactor) DO UPDATE SET emoji=excluded.emoji, ts=excluded.ts`,
+			m.ID, reactor, emoji, ts)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.Message(ctx, m.ID)
+}
+
+// ApplyReceipt advances the status of our outgoing messages with the given
+// timestamps. Returns the messages whose status changed.
+func (s *Store) ApplyReceipt(ctx context.Context, self string, status model.Status, timestamps []int64) ([]*model.Message, error) {
+	var changed []*model.Message
+	for _, ts := range timestamps {
+		rows, err := s.db.Query(ctx, messageSelect+` WHERE author=$1 AND ts=$2 AND outgoing=1`, self, ts)
+		if err != nil {
+			return nil, err
+		}
+		var ms []*model.Message
+		for rows.Next() {
+			m, err := scanMessage(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ms = append(ms, m)
+		}
+		rows.Close()
+		for _, m := range ms {
+			if status.Rank() <= m.Status.Rank() {
+				continue
+			}
+			if _, err := s.db.Exec(ctx, `UPDATE sh_message SET status=$2 WHERE id=$1`, m.ID, string(status)); err != nil {
+				return nil, err
+			}
+			m.Status = status
+			changed = append(changed, m)
+		}
+	}
+	return changed, nil
+}
+
+func (s *Store) SetStatus(ctx context.Context, id int64, status model.Status) error {
+	_, err := s.db.Exec(ctx, `UPDATE sh_message SET status=$2 WHERE id=$1`, id, string(status))
+	return err
+}
+
+// MarkThreadRead marks all incoming messages in a thread read and returns the
+// ones that were unread (for sending read receipts).
+func (s *Store) MarkThreadRead(ctx context.Context, thread model.ThreadID) ([]model.MessageRef, error) {
+	rows, err := s.db.Query(ctx, `SELECT author, ts FROM sh_message WHERE thread_id=$1 AND outgoing=0 AND read=0`, string(thread))
+	if err != nil {
+		return nil, err
+	}
+	var refs []model.MessageRef
+	for rows.Next() {
+		var r model.MessageRef
+		if err := rows.Scan(&r.Author, &r.TS); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		refs = append(refs, r)
+	}
+	rows.Close()
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	_, err = s.db.Exec(ctx, `UPDATE sh_message SET read=1 WHERE thread_id=$1 AND outgoing=0 AND read=0`, string(thread))
+	return refs, err
+}
+
+// ApplyReadSync marks messages read on another device: each ref and every
+// earlier incoming message in the same thread. Returns affected thread IDs.
+func (s *Store) ApplyReadSync(ctx context.Context, refs []model.MessageRef) ([]model.ThreadID, error) {
+	seen := map[model.ThreadID]bool{}
+	var threads []model.ThreadID
+	for _, r := range refs {
+		var thread string
+		err := s.db.QueryRow(ctx, `SELECT thread_id FROM sh_message WHERE author=$1 AND ts=$2 LIMIT 1`, r.Author, r.TS).Scan(&thread)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		if _, err := s.db.Exec(ctx, `UPDATE sh_message SET read=1 WHERE thread_id=$1 AND outgoing=0 AND ts <= $2`, thread, r.TS); err != nil {
+			return nil, err
+		}
+		if !seen[model.ThreadID(thread)] {
+			seen[model.ThreadID(thread)] = true
+			threads = append(threads, model.ThreadID(thread))
+		}
+	}
+	return threads, nil
+}
+
+// PendingAttachment is an attachment still to be downloaded.
+type PendingAttachment struct {
+	MessageID int64
+	Thread    model.ThreadID
+	TS        int64
+	model.Attachment
+}
+
+func (s *Store) PendingAttachments(ctx context.Context) ([]PendingAttachment, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT a.message_id, m.thread_id, m.ts, a.idx, a.content_type, a.filename, a.size, a.voice_note, a.pointer
+		FROM sh_attachment a JOIN sh_message m ON m.id = a.message_id
+		WHERE a.state = 'pending' AND a.pointer IS NOT NULL ORDER BY a.message_id, a.idx`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingAttachment
+	for rows.Next() {
+		var p PendingAttachment
+		if err := rows.Scan(&p.MessageID, &p.Thread, &p.TS, &p.Index, &p.ContentType, &p.Filename, &p.Size, &p.VoiceNote, &p.Pointer); err != nil {
+			return nil, err
+		}
+		p.State = model.AttachmentPending
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateAttachment(ctx context.Context, messageID int64, idx int, state model.AttachmentState, path, errMsg string) error {
+	_, err := s.db.Exec(ctx, `UPDATE sh_attachment SET state=$3, path=$4, error=$5 WHERE message_id=$1 AND idx=$2`,
+		messageID, idx, string(state), path, errMsg)
+	return err
+}
