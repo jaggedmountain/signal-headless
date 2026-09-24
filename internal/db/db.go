@@ -57,7 +57,9 @@ var historySchema = []string{
 		title       TEXT NOT NULL DEFAULT '',
 		last_ts     INTEGER NOT NULL DEFAULT 0,
 		archived    INTEGER NOT NULL DEFAULT 0,
-		muted_until INTEGER NOT NULL DEFAULT 0
+		muted_until INTEGER NOT NULL DEFAULT 0,
+		expire_timer   INTEGER NOT NULL DEFAULT 0, -- disappearing messages, seconds
+		expire_version INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE TABLE sh_message (
 		id          INTEGER PRIMARY KEY,
@@ -75,7 +77,8 @@ var historySchema = []string{
 		quote_text  TEXT NOT NULL DEFAULT '',
 		edited_at   INTEGER NOT NULL DEFAULT 0,
 		deleted     INTEGER NOT NULL DEFAULT 0,
-		expires_in  INTEGER NOT NULL DEFAULT 0,
+		expires_in  INTEGER NOT NULL DEFAULT 0,  -- seconds
+		expire_start INTEGER NOT NULL DEFAULT 0, -- ms; timer starts when read (incoming) or sent
 		sticker     TEXT NOT NULL DEFAULT '',
 		UNIQUE (thread_id, author, ts)
 	);

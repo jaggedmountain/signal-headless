@@ -101,6 +101,13 @@ type ConnectionEvent struct {
 	Err   string
 }
 
+// TimerEvent changes a thread's disappearing-messages timer.
+type TimerEvent struct {
+	Thread  model.ThreadID
+	Seconds uint32
+	Version uint32
+}
+
 // ContactsEvent signals that contact or group metadata changed.
 type ContactsEvent struct{}
 
@@ -116,4 +123,5 @@ func (ReadSyncEvent) isEvent()   {}
 func (TypingEvent) isEvent()     {}
 func (ConnectionEvent) isEvent() {}
 func (ContactsEvent) isEvent()   {}
+func (TimerEvent) isEvent()      {}
 func (QueueEmptyEvent) isEvent() {}

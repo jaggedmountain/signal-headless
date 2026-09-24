@@ -28,6 +28,7 @@ type Thread struct {
 	LastPreview string     `json:"lastPreview,omitempty"`
 	LastAuthor  string     `json:"lastAuthor,omitempty"`
 	NoteToSelf  bool       `json:"noteToSelf,omitempty"`
+	ExpireTimer uint32     `json:"expireTimer,omitempty"` // disappearing messages, seconds
 }
 
 type Status string
@@ -190,4 +191,7 @@ type Outgoing struct {
 	Body        string   `json:"body"`
 	Attachments []string `json:"attachments,omitempty"` // absolute paths on the daemon host
 	Quote       *Quote   `json:"quote,omitempty"`
+	// Set by the daemon from the thread's disappearing-messages setting.
+	ExpireTimer   uint32 `json:"-"`
+	ExpireVersion uint32 `json:"-"`
 }
