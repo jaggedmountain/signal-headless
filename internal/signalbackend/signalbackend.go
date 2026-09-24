@@ -123,6 +123,7 @@ func (b *Backend) Run(ctx context.Context, h backend.Handler) error {
 		}
 	}()
 
+	synced := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -138,6 +139,13 @@ func (b *Backend) Run(ctx context.Context, h backend.Handler) error {
 			switch st.Event {
 			case signalmeow.SignalConnectionEventConnected:
 				emit(backend.ConnectionEvent{State: model.ConnConnected})
+				if !synced && b.dev.MasterKey != nil {
+					// Storage service holds contact names and the account
+					// record, whose read-receipt/typing settings signalmeow
+					// honours when sending.
+					synced = true
+					go b.cli.SyncStorage(ctx)
+				}
 			case signalmeow.SignalConnectionEventDisconnected:
 				emit(backend.ConnectionEvent{State: model.ConnDisconnected, Err: errStr})
 			case signalmeow.SignalConnectionEventLoggedOut:
