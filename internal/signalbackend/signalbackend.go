@@ -72,6 +72,11 @@ func New(ctx context.Context, d *db.DB, log zerolog.Logger) (*Backend, error) {
 	b := &Backend{db: d, dev: dev, log: log, groupRev: map[types.GroupIdentifier]uint32{}}
 	b.cli = signalmeow.NewClient(dev, log.With().Str("component", "signalmeow").Logger(), b.onEvent)
 	b.cli.SyncContactsOnConnect = true
+	if n, err := b.pruneDeadSessions(ctx); err != nil {
+		return nil, fmt.Errorf("prune sessions: %w", err)
+	} else if n > 0 {
+		log.Info().Int("count", n).Msg("Pruned sessions without current state")
+	}
 	return b, nil
 }
 
@@ -114,7 +119,7 @@ func (b *Backend) Run(ctx context.Context, h backend.Handler) error {
 	}
 	defer func() {
 		if err := b.cli.StopReceiveLoops(); err != nil {
-			b.log.Err(err).Msg("Failed to stop receive loops")
+			b.log.Debug().Err(err).Msg("Stopping receive loops")
 		}
 	}()
 
@@ -375,6 +380,17 @@ func parseThread(thread model.ThreadID) (libsignalgo.ServiceID, types.GroupIdent
 }
 
 func (b *Backend) sendContent(ctx context.Context, thread model.ThreadID, content *signalpb.Content) error {
+	var err error
+	for range 4 {
+		err = b.sendContentOnce(ctx, thread, content)
+		if !b.pruneFromError(ctx, err) {
+			return err
+		}
+	}
+	return err
+}
+
+func (b *Backend) sendContentOnce(ctx context.Context, thread model.ThreadID, content *signalpb.Content) error {
 	sid, gid, err := parseThread(thread)
 	if err != nil {
 		return err
