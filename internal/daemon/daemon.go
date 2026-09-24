@@ -666,6 +666,28 @@ func (d *Daemon) handle(ctx context.Context, c *rpc.Conn, method string, params 
 		}
 		d.wakeAttachments()
 		return struct{}{}, nil
+	case "debugInject":
+		// Development only: the fake backend can inject incoming messages.
+		inj, ok := d.be.(interface{ Inject(backend.Event) error })
+		if !ok {
+			return nil, rpc.Errorf(rpc.CodeMethodNotFound, "method not found: %s", method)
+		}
+		var p struct {
+			Message        model.Message `json:"message"`
+			AttachmentData []string      `json:"attachmentData"`
+		}
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		for i := range p.Message.Attachments {
+			if i < len(p.AttachmentData) {
+				p.Message.Attachments[i].Pointer = []byte(p.AttachmentData[i])
+			}
+		}
+		if p.Message.TS == 0 {
+			p.Message.TS = d.nextTS()
+		}
+		return struct{}{}, inj.Inject(backend.MessageEvent{Message: p.Message})
 	case "listIdentities", "updateProfile", "listDevices", "getUserStatus", "sendReceipt", "subscribeReceive", "unsubscribeReceive":
 		// signal-cli methods clients commonly call; accepted as no-ops.
 		return []any{}, nil
