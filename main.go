@@ -43,6 +43,7 @@ type options struct {
 	signalCLIDir string
 	account      string
 	verbose      bool
+	dryRun       bool
 	fake         bool
 	foreground   bool
 }
@@ -60,10 +61,11 @@ func parseFlags(args []string) (*options, error) {
 	fs.StringVar(&o.message, "m", "", "message text for --send (default: read stdin)")
 	fs.Var(&o.attachments, "a", "attachment `FILE` for --send (repeatable)")
 	fs.StringVar(&o.name, "name", defaultDeviceName(), "device name shown on the phone (--link)")
-	fs.StringVar(&o.dataDir, "data", "", "data directory (default $XDG_DATA_HOME/signal-headless)")
+	fs.StringVar(&o.dataDir, "data", "", "data directory (default ~/.local/share/signal-headless)")
 	fs.StringVar(&o.socket, "socket", "", "daemon socket path (default $XDG_RUNTIME_DIR/signal-headless.sock)")
 	fs.StringVar(&o.signalCLIDir, "signal-cli-dir", "", "signal-cli data dir for --import-signal-cli (default ~/.local/share/signal-cli)")
 	fs.StringVar(&o.account, "account", "", "signal-cli account number to import, when it holds several")
+	fs.BoolVar(&o.dryRun, "dry-run", false, "--import-signal-cli: validate into a scratch database only")
 	fs.BoolVar(&o.verbose, "v", false, "verbose logging")
 	fs.BoolVar(&o.fake, "fake", false, "daemon: use an in-memory fake Signal backend (development)")
 	fs.BoolVar(&o.foreground, "foreground", true, "daemon: log to stderr (false: log to data dir)")

@@ -26,3 +26,12 @@ func isTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	return ok && isatty.IsTerminal(f.Fd())
 }
+
+// quietLevel is the level for chatty subsystems (DB migrations): warnings
+// only unless -v.
+func quietLevel(o *options) zerolog.Level {
+	if o.verbose {
+		return zerolog.DebugLevel
+	}
+	return zerolog.WarnLevel
+}

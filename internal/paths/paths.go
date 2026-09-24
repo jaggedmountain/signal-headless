@@ -2,7 +2,7 @@
 //
 // Layout (all overridable with --data / SIGNAL_HEADLESS_DATA):
 //
-//	$XDG_DATA_HOME/signal-headless/
+//	~/.local/share/signal-headless/
 //	  signal-headless.db     signalmeow keys + sessions, message history
 //	  attachments/           downloaded attachments
 //	  daemon.log             daemon log when auto-started by --shell
@@ -29,11 +29,10 @@ func Resolve(dataOverride, socketOverride string) Paths {
 		p.DataDir = os.Getenv("SIGNAL_HEADLESS_DATA")
 	}
 	if p.DataDir == "" {
-		base := os.Getenv("XDG_DATA_HOME")
-		if base == "" {
-			base = filepath.Join(home(), ".local", "share")
-		}
-		p.DataDir = filepath.Join(base, appName)
+		// XDG_DATA_HOME is deliberately ignored: confined terminals (e.g. the
+		// VS Code snap) point it at a private directory, which would split the
+		// daemon and its clients across two stores.
+		p.DataDir = filepath.Join(home(), ".local", "share", appName)
 	}
 	if p.Socket == "" {
 		p.Socket = os.Getenv("SIGNAL_HEADLESS_SOCKET")
@@ -59,6 +58,9 @@ func (p Paths) Ensure() error {
 	}
 	return os.Chmod(p.DataDir, 0o700)
 }
+
+// Home returns the user's home directory ("." if unknown).
+func Home() string { return home() }
 
 func home() string {
 	h, err := os.UserHomeDir()

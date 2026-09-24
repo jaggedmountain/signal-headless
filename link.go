@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/rs/zerolog"
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow"
 
@@ -18,11 +17,7 @@ func openDB(ctx context.Context, o *options, p paths.Paths) (*db.DB, error) {
 	if err := p.Ensure(); err != nil {
 		return nil, err
 	}
-	log := newLogger(nil, o.verbose)
-	if !o.verbose {
-		log = log.Level(zerolog.WarnLevel)
-	}
-	return db.Open(ctx, p.DB(), log)
+	return db.Open(ctx, p.DB(), newLogger(nil, o.verbose).Level(quietLevel(o)))
 }
 
 func runLink(ctx context.Context, o *options, p paths.Paths) error {
