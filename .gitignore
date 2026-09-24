@@ -1,0 +1,6 @@
+/third_party/
+/bin/
+*.db
+*.db-shm
+*.db-wal
+/.claude/settings.local.json
