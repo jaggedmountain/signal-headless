@@ -1,0 +1,16 @@
+[Unit]
+Description=signal-headless daemon (linked Signal device)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/signal-headless --daemon
+# Exits non-zero if the device is unlinked or signal-cli starts on the same
+# identity; retry slowly rather than hammering.
+Restart=on-failure
+RestartSec=30
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

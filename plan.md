@@ -48,3 +48,25 @@ Easy keyboard transition between threads, with seamless response/attach etc.
    counts, notifications of new messages.
 6. Polish: systemd unit, README, signal-cli-compatible RPC subset for
    signal_agent, tests (fake transport for daemon/shell).
+
+## Status (2026-09-24)
+
+All six milestones are implemented and committed; see README.md for usage.
+
+- [x] 1 Build plumbing (Makefile builds libsignal + binary)
+- [x] 2 `--link` — verified against Signal's provisioning server (QR shown; not scanned)
+- [x] 3 `--import-signal-cli` — real import done (device 3); 35 archived-only
+      sessions pruned on first start; send path verified live (Note to Self)
+- [x] 4 `--daemon` — connects live, storage sync, prekeys consistent with server;
+      signal-cli compat verified by running signal_agent unmodified against it (fake backend)
+- [x] 5 `--shell` — exercised in tmux against fake and live daemons
+- [x] 6 systemd unit, README, tests (history, importer, daemon, tui)
+
+Open items:
+- Live *receive* path not yet observed (no inbound traffic during the run).
+- signal_agent.service is stopped but still **enabled**: it would start
+  signal-cli at next login/boot. The daemon guards against this by shutting
+  down, but better: disable it, or switch it to signal-headless (README).
+- signal-headless.service is provided but not installed/enabled.
+- Not supported: calls, stories, polls/payments (shown as placeholders),
+  group management, editing sent messages, sticker packs, link previews.
