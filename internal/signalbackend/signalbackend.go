@@ -759,3 +759,23 @@ func (b *Backend) DownloadAttachment(ctx context.Context, pointer []byte, dest s
 	}
 	return os.Rename(tmp, dest)
 }
+
+// Unlink removes this device from the account (like unlinking it on the
+// phone), then forgets its keys.
+func (b *Backend) Unlink(ctx context.Context) error {
+	if err := b.cli.Unlink(ctx); err != nil {
+		return fmt.Errorf("unlink on the server: %w", err)
+	}
+	b.log.Warn().Int("device", b.dev.DeviceID).Msg("Device unlinked from the account")
+	return ForgetDevice(ctx, b.db)
+}
+
+// ForgetDevice deletes the stored device and everything keyed to it (keys,
+// sessions, contact cache) without contacting Signal. Message history stays.
+func ForgetDevice(ctx context.Context, d *db.DB) error {
+	dev, err := LoadDevice(ctx, d)
+	if err != nil {
+		return err
+	}
+	return d.Signal.DeleteDevice(ctx, &dev.DeviceData)
+}

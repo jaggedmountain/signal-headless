@@ -215,6 +215,11 @@ func (f *Fake) ResolveRecipient(ctx context.Context, s string) (model.ThreadID, 
 	return "", fmt.Errorf("unknown recipient %q", s)
 }
 
+func (f *Fake) Unlink(ctx context.Context) error {
+	f.record(Sent{Kind: "unlink"})
+	return nil
+}
+
 // DownloadAttachment writes the pointer bytes as the file content; a pointer
 // of "fail" simulates a download error.
 func (f *Fake) DownloadAttachment(ctx context.Context, pointer []byte, dest string) error {

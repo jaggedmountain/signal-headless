@@ -21,6 +21,7 @@ const (
 	MListGroups   = "listGroups"   // → []model.GroupInfo
 	MResolve      = "resolve"      // ResolveParams → ResolveResult
 	MRetry        = "retryAttachment"
+	MUnlink       = "unlink" // UnlinkParams; removes this device from the account, daemon exits
 )
 
 // Native event notifications (after subscribe).
@@ -120,4 +121,9 @@ type ResolveResult struct {
 
 type RetryParams struct {
 	MessageID int64 `json:"messageId"`
+}
+
+// UnlinkParams must carry the account's number as confirmation.
+type UnlinkParams struct {
+	Number string `json:"number"`
 }

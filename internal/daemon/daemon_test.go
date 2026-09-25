@@ -24,6 +24,7 @@ type env struct {
 	d    *Daemon
 	dir  string
 	sock string
+	done chan struct{}
 }
 
 func start(t *testing.T) *env {
@@ -53,7 +54,7 @@ func start(t *testing.T) *env {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return &env{t: t, fake: fake, d: d, dir: dir, sock: sock}
+	return &env{t: t, fake: fake, d: d, dir: dir, sock: sock, done: done}
 }
 
 func (e *env) dial(native bool) *rpc.Client {
@@ -282,5 +283,33 @@ func TestSanitize(t *testing.T) {
 		if got := sanitize(in); got != want {
 			t.Errorf("sanitize(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestUnlink(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	if err := c.Call(context.Background(), rpc.MUnlink, rpc.UnlinkParams{Number: "+19999999999"}, nil); err == nil {
+		t.Fatal("wrong confirmation number must be rejected")
+	}
+	for _, s := range e.fake.Sent() {
+		if s.Kind == "unlink" {
+			t.Fatal("unlinked despite wrong confirmation")
+		}
+	}
+	e.call(c, rpc.MUnlink, rpc.UnlinkParams{Number: "+15550000000"}, nil)
+	select {
+	case <-e.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop after unlink")
+	}
+	var n int
+	for _, s := range e.fake.Sent() {
+		if s.Kind == "unlink" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("unlink calls = %d", n)
 	}
 }

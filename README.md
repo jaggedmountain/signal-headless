@@ -4,6 +4,7 @@ A headless Signal client in one Go binary — no Java, no Docker, no signal-cli.
 
 ```
 signal-headless --link                 link this host as a Signal device (QR code)
+signal-headless --unlink [--force]     remove this device from the account (history is kept)
 signal-headless --import-signal-cli    adopt the device signal-cli already linked
 signal-headless --daemon               run the device: receive, store, serve clients
 signal-headless --shell                interactive TUI (default; starts the daemon if needed)
@@ -77,6 +78,13 @@ queue and corrupt each other's sessions. The daemon refuses to start while a
 signal-cli process exists and shuts down if one appears. Disable anything that
 would start it (e.g. `systemctl --user disable signal_agent.service` unless it
 is switched over as described below).
+
+To remove the device, run `signal-headless --unlink`: it unlinks the device on
+the server (like Linked devices → Unlink on the phone), deletes its keys and
+stops the daemon, after asking for the account number as confirmation.
+Message history is kept, so `--link` can link the host again without losing
+it. If the phone already removed the device, `--unlink --force` deletes the
+local keys without contacting Signal (the daemon must be stopped).
 
 On first start the daemon prunes session records that hold no current state
 (signal-cli keeps these for reset/unlinked devices; they would otherwise block

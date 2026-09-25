@@ -42,6 +42,7 @@ type Daemon struct {
 	lastTS     int64
 	names      map[string]string // author ID → display name cache
 
+	stop       context.CancelFunc
 	attachWake chan struct{}
 	// compatPending holds compat envelopes waiting for attachment downloads.
 	compatPending map[int64]bool
@@ -68,6 +69,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.srv = srv
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	d.mu.Lock()
+	d.stop = cancel
+	d.mu.Unlock()
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -666,6 +670,26 @@ func (d *Daemon) handle(ctx context.Context, c *rpc.Conn, method string, params 
 			}
 		}
 		d.wakeAttachments()
+		return struct{}{}, nil
+	case rpc.MUnlink:
+		var p rpc.UnlinkParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		if p.Number != d.acct.Number {
+			return nil, rpc.Errorf(rpc.CodeInvalidParams, "confirmation %q does not match the account number", p.Number)
+		}
+		if err := d.be.Unlink(ctx); err != nil {
+			return nil, err
+		}
+		d.mu.Lock()
+		d.conn, d.connErr = model.ConnLoggedOut, "device unlinked"
+		stop := d.stop
+		d.mu.Unlock()
+		d.broadcast(rpc.EvConnection, d.status())
+		d.log.Warn().Msg("Unlinked; shutting down")
+		// Let the reply reach the client before the socket closes.
+		time.AfterFunc(500*time.Millisecond, stop)
 		return struct{}{}, nil
 	case "debugInject":
 		// Development only: the fake backend can inject incoming messages.

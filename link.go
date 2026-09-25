@@ -48,7 +48,7 @@ func runLink(ctx context.Context, o *options, p paths.Paths) error {
 	}
 	defer d.Close()
 	if dev, err := signalbackend.LoadDevice(ctx, d); err == nil {
-		return fmt.Errorf("already linked as %s (device %d); remove %s to link again", dev.Number, dev.DeviceID, p.DataDir)
+		return fmt.Errorf("already linked as %s (device %d); run --unlink first (message history is kept)", dev.Number, dev.DeviceID)
 	}
 	log := newLogger(nil, o.verbose)
 	ctx = log.WithContext(ctx)

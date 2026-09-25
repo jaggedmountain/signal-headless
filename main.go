@@ -1,6 +1,7 @@
 // signal-headless: a headless Signal client.
 //
 //	signal-headless --link [--name NAME]     link this host as a Signal device (QR)
+//	signal-headless --unlink [--force]       remove this device from the account
 //	signal-headless --import-signal-cli      adopt the device already linked by signal-cli
 //	signal-headless --daemon                 run the device: receive, store, serve clients
 //	signal-headless --shell                  interactive TUI (starts the daemon if needed)
@@ -31,7 +32,7 @@ func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
 type options struct {
-	link, daemon, shell, importCLI, status, showVersion bool
+	link, unlink, force, daemon, shell, importCLI, status, showVersion bool
 
 	sendTo      string
 	message     string
@@ -52,6 +53,8 @@ func parseFlags(args []string) (*options, error) {
 	o := &options{}
 	fs := flag.NewFlagSet("signal-headless", flag.ContinueOnError)
 	fs.BoolVar(&o.link, "link", false, "link this host as a new Signal device (shows a QR code)")
+	fs.BoolVar(&o.unlink, "unlink", false, "remove this device from the Signal account and delete its keys (history is kept)")
+	fs.BoolVar(&o.force, "force", false, "--unlink: only delete the local keys, without contacting Signal")
 	fs.BoolVar(&o.importCLI, "import-signal-cli", false, "import the device already linked by signal-cli (read-only)")
 	fs.BoolVar(&o.daemon, "daemon", false, "run the linked-device daemon")
 	fs.BoolVar(&o.shell, "shell", false, "interactive terminal UI")
@@ -70,7 +73,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.fake, "fake", false, "daemon: use an in-memory fake Signal backend (development)")
 	fs.BoolVar(&o.foreground, "foreground", true, "daemon: log to stderr (false: log to data dir)")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: signal-headless [--link | --import-signal-cli | --daemon | --shell | --send TO | --status]\n\n")
+		fmt.Fprintf(fs.Output(), "usage: signal-headless [--link | --unlink [--force] | --import-signal-cli | --daemon | --shell | --send TO | --status]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -80,13 +83,13 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	modes := 0
-	for _, b := range []bool{o.link, o.importCLI, o.daemon, o.shell, o.status, o.showVersion, o.sendTo != ""} {
+	for _, b := range []bool{o.link, o.unlink, o.importCLI, o.daemon, o.shell, o.status, o.showVersion, o.sendTo != ""} {
 		if b {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return nil, errors.New("choose one of --link, --import-signal-cli, --daemon, --shell, --send, --status, --version")
+		return nil, errors.New("choose one of --link, --unlink, --import-signal-cli, --daemon, --shell, --send, --status, --version")
 	}
 	if modes == 0 {
 		o.shell = true
@@ -141,6 +144,8 @@ func main() {
 		fmt.Println("signal-headless", version)
 	case o.link:
 		err = runLink(ctx, o, p)
+	case o.unlink:
+		err = runUnlink(ctx, o, p)
 	case o.importCLI:
 		err = runImport(ctx, o, p)
 	case o.daemon:

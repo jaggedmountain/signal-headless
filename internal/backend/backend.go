@@ -38,6 +38,10 @@ type Backend interface {
 	// ResolveRecipient turns user input (+E164, UUID, group ID, 'self') into a thread ID.
 	ResolveRecipient(ctx context.Context, s string) (model.ThreadID, error)
 
+	// Unlink removes this device from the Signal account and deletes its
+	// keys locally. Message history is not touched.
+	Unlink(ctx context.Context) error
+
 	// DownloadAttachment fetches and decrypts an attachment into dest.
 	DownloadAttachment(ctx context.Context, pointer []byte, dest string) error
 }
