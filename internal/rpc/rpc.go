@@ -344,7 +344,7 @@ func (c *Client) Notifications() <-chan Notification { return c.notes }
 
 // Done is closed when the connection ends; Err then reports why.
 func (c *Client) Done() <-chan struct{} { return c.done }
-func (c *Client) Err() error             { return c.err }
+func (c *Client) Err() error            { return c.err }
 
 func (c *Client) Close() error { return c.nc.Close() }
 

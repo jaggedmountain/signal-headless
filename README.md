@@ -128,7 +128,8 @@ switching conversations mid-sentence is free.
 | `y` | copy the message text (OSC 52 clipboard) |
 | `/` | search this thread; `/` `enter` again for the next match |
 | `:` | commands: `to`, `attach`, `detach`, `archive`, `unarchive`, `archived`, `read`, `search`, `react`, `retry`, `open`, `help`, `quit` |
-| `?`, `q` | help, quit |
+| `?` | help |
+| `q` | quit — confirm with `q` or `enter`, any other key cancels (`ctrl+c` quits at once) |
 
 Opening a thread marks it read (and sends read receipts if enabled). The
 terminal bell rings for messages in other threads; `SIGNAL_HEADLESS_BELL=0`

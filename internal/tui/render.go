@@ -547,7 +547,7 @@ var helpText = `signal-headless — keys
  Commands (:)   to NAME · attach PATH · detach · archive · unarchive · archived
                 read · search TEXT · react EMOJI · retry · open · help · quit
 
- q quit · ? close this help`
+ q quit (confirm with q or enter; ctrl+c quits at once) · ? close this help`
 
 func (m *Model) renderHelp() string {
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).Padding(0, 1).Render(helpText)

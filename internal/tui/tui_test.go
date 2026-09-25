@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"signal-headless/internal/model"
@@ -168,5 +169,44 @@ func TestEmojize(t *testing.T) {
 		if got := emojize(in); got != want {
 			t.Errorf("emojize(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestQuitNeedsConfirmation(t *testing.T) {
+	press := func(m *Model, k string) {
+		var msg tea.KeyPressMsg
+		switch k {
+		case "enter":
+			msg = tea.KeyPressMsg{Code: tea.KeyEnter}
+		default:
+			msg = tea.KeyPressMsg{Code: rune(k[0]), Text: k}
+		}
+		m.handleKey(msg)
+	}
+	m := testModel()
+	press(m, "q")
+	if m.quit || m.mode != modePrompt || m.promptKind != promptConfirmQuit {
+		t.Fatalf("q should ask first: quit=%v mode=%v", m.quit, m.mode)
+	}
+	press(m, "x")
+	if m.quit || m.mode != modeNormal {
+		t.Fatal("other keys should cancel")
+	}
+	press(m, "q")
+	press(m, "q")
+	if !m.quit {
+		t.Fatal("q q should quit")
+	}
+	m = testModel()
+	press(m, "q")
+	press(m, "enter")
+	if !m.quit {
+		t.Fatal("q enter should quit")
+	}
+	m = testModel()
+	m.cur = ""
+	press(m, "q")
+	if m.mode != modePrompt {
+		t.Fatal("quit prompt should work with no thread open")
 	}
 }

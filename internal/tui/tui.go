@@ -40,6 +40,7 @@ const (
 	promptReact
 	promptSearch
 	promptConfirmDelete
+	promptConfirmQuit
 )
 
 // quickReactions are selectable with 1-6 in the reaction prompt.
@@ -609,7 +610,7 @@ func (m *Model) quitCmd() tea.Cmd {
 func (m *Model) handleNormalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "q":
-		return m, m.quitCmd()
+		return m, m.startPrompt(promptConfirmQuit, "Quit? (q or enter) ", "")
 	case "?":
 		m.mode = modeHelp
 	case "J":
@@ -808,7 +809,7 @@ func (m *Model) defaultAttachDir() string {
 // --- prompts ---
 
 func (m *Model) startPrompt(kind promptKind, label, initial string) tea.Cmd {
-	if kind != promptCommand && kind != promptTo && m.cur == "" && kind != promptSearch {
+	if kind != promptCommand && kind != promptTo && kind != promptConfirmQuit && m.cur == "" && kind != promptSearch {
 		m.setFlash("open a conversation first")
 		return nil
 	}
@@ -846,6 +847,13 @@ func (m *Model) handlePromptKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		kind := m.promptKind
 		m.endPrompt()
 		return m, m.submitPrompt(kind, val)
+	}
+	if m.promptKind == promptConfirmQuit {
+		m.endPrompt()
+		if k.String() == "q" {
+			return m, m.quitCmd()
+		}
+		return m, nil // any other key cancels
 	}
 	if m.promptKind == promptConfirmDelete {
 		m.endPrompt()
@@ -887,6 +895,8 @@ func (m *Model) react(emoji string) tea.Cmd {
 func (m *Model) submitPrompt(kind promptKind, val string) tea.Cmd {
 	val = strings.TrimSpace(val)
 	switch kind {
+	case promptConfirmQuit:
+		return m.quitCmd()
 	case promptTo:
 		if val == "" {
 			return nil
