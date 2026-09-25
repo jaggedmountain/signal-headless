@@ -1,8 +1,12 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package tui
 
 import (
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,7 +19,7 @@ import (
 )
 
 var (
-	colAccent = lipgloss.Color("12")
+	colAccent = lipgloss.Color("#e67e22") // brand orange; downsampled on 256/16-colour terminals
 	colDim    = lipgloss.Color("8")
 	colErr    = lipgloss.Color("9")
 	colOK     = lipgloss.Color("10")
@@ -76,6 +80,19 @@ func (m *Model) View() tea.View {
 	sep := stDim.Render(strings.Repeat("│\n", bodyH-1) + "│")
 	body := lipgloss.JoinHorizontal(lipgloss.Top, side, sep, main)
 	v.SetContent(lipgloss.JoinVertical(lipgloss.Left, body, bottom))
+	// The real terminal cursor, where the input is (renderBottom noted the
+	// input's row within the bottom area).
+	var c *tea.Cursor
+	switch m.mode {
+	case modeCompose:
+		c = m.compose.Cursor()
+	case modePrompt:
+		c = m.prompt.Cursor()
+	}
+	if c != nil {
+		c.Y += bodyH + m.inputRow
+		v.Cursor = c
+	}
 	return v
 }
 
@@ -222,7 +239,7 @@ func (m *Model) renderHeader(w int) string {
 			title = " #" + t.Title
 		}
 		if t.ExpireTimer > 0 {
-			title += stDim.Render(" ⏱ " + (time.Duration(t.ExpireTimer) * time.Second).String())
+			title += stDim.Render(" " + timerGlyph + " " + model.TimerLabel(t.ExpireTimer))
 		}
 	}
 	if who := m.typingNames(m.cur); who != "" {
@@ -331,6 +348,10 @@ func (m *Model) renderMessage(x *model.Message, w int, selected bool) []string {
 		body = append(body, stQuote.Render(truncate("↱ "+m.nameFor(q.Author)+": "+q.Text, textW)))
 	}
 	text := x.Body
+	// Timer notices stored before the hourglass change used the stopwatch.
+	if rest, ok := strings.CutPrefix(text, "⏱ disappearing messages: "); ok {
+		text = timerGlyph + " disappearing messages: " + prettyOldTimer(rest)
+	}
 	switch {
 	case x.Deleted:
 		text = stDim.Render("(message deleted)")
@@ -342,7 +363,12 @@ func (m *Model) renderMessage(x *model.Message, w int, selected bool) []string {
 			body = append(body, strings.Split(ansi.Wrap(para, textW, " -"), "\n")...)
 		}
 	}
-	for _, a := range x.Attachments {
+	if !x.Deleted {
+		for _, p := range x.Previews {
+			body = append(body, stDim.Render(truncate("🔗 "+previewLabel(p.Title, p.URL), textW)))
+		}
+	}
+	for _, a := range x.Files() { // link-preview images are for the VS Code panel
 		label := a.Filename
 		if label == "" && a.Path != "" {
 			label = filepath.Base(a.Path)
@@ -376,9 +402,7 @@ func (m *Model) renderMessage(x *model.Message, w int, selected bool) []string {
 	if x.Outgoing {
 		suffix += " " + statusGlyph(x.Status)
 	}
-	if x.ExpiresIn > 0 && !x.Deleted {
-		suffix += stDim.Render(" ⏱")
-	}
+	// Disappearing messages are marked once, in the conversation header.
 	last := len(body) - 1
 	if ansi.StringWidth(body[last])+ansi.StringWidth(suffix) <= textW {
 		body[last] += suffix
@@ -453,6 +477,18 @@ func (m *Model) renderBottom() string {
 			}
 			parts = append(parts, stDim.Render(truncate("📎 "+strings.Join(names, ", ")+"  (A clears)", w)))
 		}
+		if lp := m.preview; lp.url != "" {
+			if lp.loading {
+				parts = append(parts, stDim.Render(truncate("🔗 fetching preview…", w)))
+			} else if lp.p != nil {
+				parts = append(parts, stDim.Render(truncate("🔗 "+previewLabel(lp.p.Title, lp.p.URL), w-20)+"  (ctrl+x drops)"))
+			}
+		}
+	}
+	// The input's row: the leading blank line plus everything above it.
+	m.inputRow = 1
+	for _, p := range parts {
+		m.inputRow += lipgloss.Height(p)
 	}
 	switch m.mode {
 	case modePrompt:
@@ -542,9 +578,11 @@ var helpText = `signal-headless — keys
    ctrl+e        edit draft in $EDITOR             o     open attachments
    ctrl+t, a     attach a file (tab completes)     R     retry failed download
    A             clear attachments                 y     copy text
-   esc           leave compose (draft is kept)     esc   back to newest
+   x / u         clear draft / restore it          esc   back to newest
+   ctrl+x        drop the link preview
+   esc           leave compose (draft is kept)
 
- Commands (:)   to NAME · attach PATH · detach · archive · unarchive · archived
+ Commands (:)   to NAME · attach PATH · detach · clear · archive · unarchive · archived
                 read · search TEXT · react EMOJI · retry · open · help · quit
 
  q quit (confirm with q or enter; ctrl+c quits at once) · ? close this help`
@@ -552,4 +590,29 @@ var helpText = `signal-headless — keys
 func (m *Model) renderHelp() string {
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).Padding(0, 1).Render(helpText)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// previewLabel is "Title — host" for a link preview line.
+func previewLabel(title, rawURL string) string {
+	host := rawURL
+	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
+		host = strings.TrimPrefix(u.Hostname(), "www.")
+	}
+	if strings.TrimSpace(title) == "" {
+		return host
+	}
+	return strings.Join(strings.Fields(title), " ") + " — " + host
+}
+
+// timerGlyph marks disappearing messages. ⌛ is an emoji-presentation
+// character that terminals draw two cells wide; the stopwatch ⏱ is
+// text-presentation, squeezed into one cell and drawn distorted.
+const timerGlyph = "⌛"
+
+// prettyOldTimer turns an old notice's Go duration ("1h0m0s") into a label.
+func prettyOldTimer(s string) string {
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return model.TimerLabel(uint32(d / time.Second))
+	}
+	return s
 }

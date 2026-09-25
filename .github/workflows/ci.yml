@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 Jeff Mattson
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev cmake
+      - name: protoc (22.04's 3.12 predates proto3 optional fields, which libsignal uses)
+        run: |
+          curl -sSfL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
+          sudo unzip -o -q /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+      - name: Cache libsignal
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/libsignal
+            ~/.cargo/registry
+          # LIBSIGNAL_REV lives in the Makefile.
+          key: libsignal-${{ runner.os }}-${{ hashFiles('Makefile') }}
+      - run: make build
+      - run: make test
+      - run: make vet
+      - name: gofmt
+        run: test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package tui is the interactive client (--shell): an aerc-style layout with
 // a thread sidebar, a message pane and a compose box. It talks to the daemon
 // exclusively over RPC.
@@ -17,7 +20,10 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"signal-headless/internal/linkpreview"
 	"signal-headless/internal/model"
 	"signal-headless/internal/rpc"
 )
@@ -48,6 +54,16 @@ var quickReactions = []string{"👍", "❤️", "😂", "😮", "😢", "🙏"}
 
 type Options struct {
 	Bell bool // ring the terminal bell for messages in other threads
+	// LinkPreviews: "account" (follow the Signal account's setting), "on",
+	// "off" — previews for links in messages sent from the shell.
+	LinkPreviews string
+}
+
+// draftPreview is the link preview offered for the current draft.
+type draftPreview struct {
+	url     string
+	p       *model.OutgoingPreview // nil while fetching, or when none
+	loading bool
 }
 
 type Model struct {
@@ -97,6 +113,14 @@ type Model struct {
 	// blurred is set while the terminal reports it lost focus; the open
 	// thread is then not marked read (no read receipts for unseen messages).
 	blurred bool
+
+	preview    draftPreview
+	dismissed  map[model.ThreadID]string // link whose preview was dropped, per draft
+	previewSeq int                       // debounce: only the latest check runs
+
+	lastSend rpc.SendParams                  // the most recent send request (tests)
+	cleared  map[model.ThreadID]clearedDraft // what x cleared, for u
+	inputRow int                             // row of the compose/prompt input within the bottom area
 }
 
 type typingInfo struct {
@@ -113,14 +137,21 @@ func New(cli *rpc.Client, opts Options) *Model {
 	ta.MaxHeight = 8
 	ta.SetHeight(1)
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j", "shift+enter"))
+	// The terminal's own cursor (placed by View) contrasts on any theme; the
+	// drawn "virtual" one and the default black cursor-line band did not.
+	ta.SetVirtualCursor(false)
+	ta.SetStyles(composeStyles())
 
 	pi := textinput.New()
 	pi.Prompt = ":"
+	pi.SetVirtualCursor(false)
+	pi.SetStyles(promptStyles())
 
 	return &Model{
 		cli: cli, opts: opts,
 		msgs: map[model.ThreadID][]*model.Message{}, loaded: map[model.ThreadID]bool{}, exhausted: map[model.ThreadID]bool{},
 		drafts: map[model.ThreadID]string{}, replyTo: map[model.ThreadID]*model.Message{}, attach: map[model.ThreadID][]string{},
+		dismissed: map[model.ThreadID]string{}, cleared: map[model.ThreadID]clearedDraft{},
 		typing:  map[model.ThreadID]map[string]typingInfo{},
 		compose: ta, prompt: pi, sel: -1,
 	}
@@ -212,6 +243,10 @@ func (m *Model) open(id model.ThreadID) tea.Cmd {
 		m.compose.SetValue(m.drafts[id])
 		m.sel, m.scroll = -1, 0
 		m.search.hits = nil
+		m.preview = draftPreview{}
+		if m.drafts[id] != "" {
+			cmds = append(cmds, m.schedulePreviewCheck())
+		}
 	}
 	if !m.loaded[id] {
 		cmds = append(cmds, m.loadMessagesCmd(id, 0))
@@ -286,9 +321,34 @@ func (m *Model) loadOlder() tea.Cmd {
 func (m *Model) layout() {
 	w := m.mainWidth()
 	m.compose.SetWidth(max(10, w))
-	lines := strings.Count(m.compose.Value(), "\n") + 1
-	m.compose.SetHeight(max(1, min(lines, 8)))
+	rows := composeRows(m.compose.Value(), m.compose.Width())
+	m.compose.SetHeight(max(1, min(rows, composeMaxRows)))
+	if rows <= composeMaxRows && m.compose.ScrollYOffset() > 0 {
+		// Everything fits, but the box grew after it scrolled (e.g. on a
+		// newline): show it from the top, keeping the cursor where it was.
+		row, col := m.compose.Line(), m.compose.Column()
+		m.compose.MoveToBegin()
+		for m.compose.Line() < row {
+			m.compose.CursorDown()
+		}
+		m.compose.SetCursorColumn(col)
+	}
 	m.prompt.SetWidth(max(10, m.width-4))
+}
+
+const composeMaxRows = 8
+
+// composeRows is how many screen rows the draft needs at width w, counting
+// wrapped lines (one more column for the cursor at a line's end).
+func composeRows(text string, w int) int {
+	if w <= 1 {
+		return 1
+	}
+	rows := 0
+	for _, line := range strings.Split(text, "\n") {
+		rows += strings.Count(ansi.Wrap(line+" ", w, ""), "\n") + 1
+	}
+	return rows
 }
 
 func (m *Model) sidebarWidth() int {
@@ -310,6 +370,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.BlurMsg:
 		m.blurred = true
+		return m, nil
+
+	case previewCheckMsg:
+		return m, m.checkPreview(msg)
+
+	case previewMsg:
+		m.gotPreview(msg)
 		return m, nil
 
 	case tea.FocusMsg:
@@ -417,7 +484,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.compose.SetValue(text)
 			m.mode = modeCompose
 			m.layout()
-			return m, m.compose.Focus()
+			return m, tea.Batch(m.compose.Focus(), m.schedulePreviewCheck())
 		}
 		m.drafts[msg.thread] = text
 		return m, nil
@@ -427,7 +494,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.compose, cmd = m.compose.Update(msg)
 			m.layout()
-			return m, cmd
+			return m, tea.Batch(cmd, m.schedulePreviewCheck())
 		}
 		if m.mode == modePrompt {
 			var cmd tea.Cmd
@@ -496,6 +563,25 @@ func (m *Model) upsertMessage(x *model.Message) (isNew bool) {
 	return true
 }
 
+// removeMessage drops a message from view, keeping the selection on the
+// same message (or the one before it).
+func (m *Model) removeMessage(thread model.ThreadID, id int64) {
+	list := m.msgs[thread]
+	for i, x := range list {
+		if x.ID != id {
+			continue
+		}
+		m.msgs[thread] = append(list[:i:i], list[i+1:]...)
+		if thread == m.cur && m.sel >= i && m.sel >= 0 {
+			m.sel--
+			if m.sel < 0 && len(m.msgs[thread]) > 0 {
+				m.sel = 0
+			}
+		}
+		return
+	}
+}
+
 func (m *Model) handleNotification(n rpc.Notification) tea.Cmd {
 	switch n.Method {
 	case rpc.EvMessage:
@@ -527,6 +613,20 @@ func (m *Model) handleNotification(n rpc.Notification) tea.Cmd {
 	case rpc.EvMessageUpdate:
 		if x, ok := decodeInto[model.Message](n.Params); ok {
 			m.upsertMessage(&x)
+		}
+	case rpc.EvHistory:
+		if h, ok := decodeInto[rpc.HistoryImported](n.Params); ok && m.loaded[h.Thread] {
+			// Refetch it when shown next (or now, if it is open).
+			delete(m.loaded, h.Thread)
+			delete(m.exhausted, h.Thread)
+			m.msgs[h.Thread] = nil
+			if h.Thread == m.cur {
+				return m.open(h.Thread)
+			}
+		}
+	case rpc.EvMessageRemoved:
+		if r, ok := decodeInto[rpc.MessageRemoved](n.Params); ok {
+			m.removeMessage(r.Thread, r.ID)
 		}
 	case rpc.EvThread:
 		if t, ok := decodeInto[model.Thread](n.Params); ok {
@@ -678,6 +778,10 @@ func (m *Model) handleNormalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "A":
 		delete(m.attach, m.cur)
 		m.setFlash("attachments cleared")
+	case "x":
+		m.clearDraft()
+	case "u":
+		m.restoreDraft()
 	case "C", "m":
 		return m, m.startPrompt(promptTo, "to: ", "")
 	case "/":
@@ -704,6 +808,13 @@ func (m *Model) handleComposeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+r":
 		delete(m.replyTo, m.cur)
 		return m, nil
+	case "ctrl+x":
+		if m.preview.url != "" {
+			m.dismissed[m.cur] = m.preview.url
+			m.preview = draftPreview{}
+			m.layout()
+		}
+		return m, nil
 	case "up":
 		if m.compose.Line() == 0 && m.compose.Value() == "" {
 			m.mode = modeNormal
@@ -720,6 +831,9 @@ func (m *Model) handleComposeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.typedAt = time.Now()
 		cmds = append(cmds, m.typingCmd(m.cur, true))
 	}
+	if m.compose.Value() != before {
+		cmds = append(cmds, m.schedulePreviewCheck())
+	}
 	return m, tea.Batch(cmds...)
 }
 
@@ -733,6 +847,12 @@ func (m *Model) sendDraft() tea.Cmd {
 	if r := m.replyTo[m.cur]; r != nil {
 		p.Quote = &model.Quote{Author: r.Author, TS: r.TS, Text: r.Body}
 	}
+	if lp := m.preview.p; lp != nil && strings.Contains(body, lp.URL) {
+		p.Previews = []model.OutgoingPreview{*lp}
+	}
+	m.preview = draftPreview{}
+	delete(m.dismissed, m.cur)
+	m.lastSend = p
 	m.compose.Reset()
 	m.drafts[m.cur] = ""
 	delete(m.replyTo, m.cur)
@@ -772,7 +892,7 @@ func (m *Model) openAttachments() tea.Cmd {
 		return nil
 	}
 	var paths []string
-	for _, a := range sel.Attachments {
+	for _, a := range sel.Files() {
 		if a.State == model.AttachmentDone && a.Path != "" {
 			paths = append(paths, a.Path)
 		}
@@ -781,12 +901,16 @@ func (m *Model) openAttachments() tea.Cmd {
 		m.setFlash("no downloaded attachments on this message")
 		return nil
 	}
-	opener := "xdg-open"
-	if runtime.GOOS == "darwin" {
-		opener = "open"
-	}
 	for _, p := range paths {
-		c := exec.Command(opener, p)
+		var c *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			c = exec.Command("open", p)
+		case "windows":
+			c = exec.Command("rundll32", "url.dll,FileProtocolHandler", p)
+		default:
+			c = exec.Command("xdg-open", p)
+		}
 		c.Stdout, c.Stderr = nil, nil
 		if err := c.Start(); err != nil {
 			m.errText = err.Error()
@@ -997,7 +1121,7 @@ func (m *Model) nextHit() tea.Cmd {
 type retryHitMsg struct{}
 
 var commandHelp = []string{
-	"to NAME", "attach PATH", "detach", "archive", "unarchive", "archived", "read", "search TEXT", "react EMOJI",
+	"to NAME", "attach PATH", "detach", "clear", "archive", "unarchive", "archived", "read", "search TEXT", "react EMOJI",
 	"retry", "open", "help", "quit",
 }
 
@@ -1021,6 +1145,8 @@ func (m *Model) runCommand(line string) tea.Cmd {
 		return m.addAttachment(arg)
 	case "detach":
 		delete(m.attach, m.cur)
+	case "clear":
+		m.clearDraft()
 	case "archive":
 		return m.archiveCmd(m.cur, true)
 	case "unarchive":
@@ -1046,4 +1172,150 @@ func (m *Model) runCommand(line string) tea.Cmd {
 		m.errText = fmt.Sprintf("unknown command %q (try :help)", cmd)
 	}
 	return nil
+}
+
+// --- link previews for the draft ---
+
+// previewDebounce: how long typing must pause before a link is looked up.
+const previewDebounce = 900 * time.Millisecond
+
+type (
+	previewCheckMsg struct {
+		seq    int
+		thread model.ThreadID
+	}
+	previewMsg struct {
+		thread model.ThreadID
+		url    string
+		p      *model.OutgoingPreview
+	}
+)
+
+func (m *Model) previewsEnabled() bool {
+	switch m.opts.LinkPreviews {
+	case "on":
+		return true
+	case "off":
+		return false
+	}
+	return m.status.LinkPreviews
+}
+
+func (m *Model) schedulePreviewCheck() tea.Cmd {
+	m.previewSeq++
+	seq, thread := m.previewSeq, m.cur
+	return tea.Tick(previewDebounce, func(time.Time) tea.Msg { return previewCheckMsg{seq: seq, thread: thread} })
+}
+
+// checkPreview runs after typing pauses: it looks up the first https link
+// in the draft, unless it is the one already shown or dropped.
+func (m *Model) checkPreview(msg previewCheckMsg) tea.Cmd {
+	if msg.seq != m.previewSeq || msg.thread != m.cur {
+		return nil
+	}
+	url := linkpreview.FirstURL(m.compose.Value())
+	if url == m.preview.url {
+		return nil
+	}
+	m.preview = draftPreview{}
+	defer m.layout()
+	if url == "" || url == m.dismissed[m.cur] || !m.previewsEnabled() {
+		return nil
+	}
+	m.preview = draftPreview{url: url, loading: true}
+	thread := m.cur
+	return func() tea.Msg {
+		var p model.OutgoingPreview
+		if err := m.call(rpc.MLinkPreview, rpc.LinkPreviewParams{URL: url}, &p); err != nil {
+			return previewMsg{thread: thread, url: url}
+		}
+		return previewMsg{thread: thread, url: url, p: &p}
+	}
+}
+
+func (m *Model) gotPreview(msg previewMsg) {
+	if msg.thread != m.cur || msg.url != m.preview.url {
+		return // the draft moved on
+	}
+	if msg.p == nil {
+		m.preview = draftPreview{}
+	} else {
+		m.preview = draftPreview{url: msg.url, p: msg.p}
+	}
+	m.layout()
+}
+
+// composeStyles: the text in the terminal's normal colour, an accent prompt
+// while writing, everything dimmed when not; no background bands.
+func composeStyles() textarea.Styles {
+	plain := lipgloss.NewStyle()
+	dim := lipgloss.NewStyle().Foreground(colDim)
+	var s textarea.Styles
+	s.Focused = textarea.StyleState{
+		Base: plain, Text: plain, CursorLine: plain, EndOfBuffer: plain,
+		Placeholder: dim, Prompt: lipgloss.NewStyle().Foreground(colAccent).Bold(true),
+		LineNumber: dim, CursorLineNumber: dim, Selection: lipgloss.NewStyle().Reverse(true),
+	}
+	s.Blurred = textarea.StyleState{
+		Base: plain, Text: dim, CursorLine: dim, EndOfBuffer: plain,
+		Placeholder: dim, Prompt: dim, LineNumber: dim, CursorLineNumber: dim, Selection: lipgloss.NewStyle().Reverse(true),
+	}
+	s.Cursor = textarea.CursorStyle{Shape: tea.CursorBar, Blink: true}
+	return s
+}
+
+func promptStyles() textinput.Styles {
+	var s textinput.Styles
+	s.Focused = textinput.StyleState{
+		Text: lipgloss.NewStyle(), Placeholder: lipgloss.NewStyle().Foreground(colDim),
+		Suggestion: lipgloss.NewStyle().Foreground(colDim), Prompt: lipgloss.NewStyle().Foreground(colAccent).Bold(true),
+	}
+	s.Blurred = s.Focused
+	s.Cursor = textinput.CursorStyle{Shape: tea.CursorBar, Blink: true}
+	return s
+}
+
+// --- clearing drafts ---
+
+type clearedDraft struct {
+	text  string
+	reply *model.Message
+}
+
+// clearDraft empties the current thread's draft and reply target (x);
+// restoreDraft (u) brings the last cleared one back.
+func (m *Model) clearDraft() {
+	if m.cur == "" {
+		return
+	}
+	text := m.compose.Value()
+	reply := m.replyTo[m.cur]
+	if text == "" && reply == nil {
+		m.setFlash("no draft to clear")
+		return
+	}
+	m.cleared[m.cur] = clearedDraft{text: text, reply: reply}
+	m.compose.Reset()
+	m.drafts[m.cur] = ""
+	delete(m.replyTo, m.cur)
+	m.preview = draftPreview{}
+	delete(m.dismissed, m.cur)
+	m.layout()
+	m.setFlash("draft cleared · u restores it")
+}
+
+func (m *Model) restoreDraft() {
+	c, ok := m.cleared[m.cur]
+	if !ok {
+		m.setFlash("nothing to restore")
+		return
+	}
+	delete(m.cleared, m.cur)
+	m.compose.SetValue(c.text)
+	m.drafts[m.cur] = c.text
+	if c.reply != nil {
+		m.replyTo[m.cur] = c.reply
+	}
+	m.layout()
+	m.setFlash("draft restored")
 }

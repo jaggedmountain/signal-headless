@@ -10,6 +10,8 @@ ExecStart=%h/.local/bin/signal-headless --daemon
 # identity; retry slowly rather than hammering.
 Restart=on-failure
 RestartSec=30
+# 3 = no linked device: restarting won't help until someone links (--link).
+RestartPreventExitStatus=3
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]

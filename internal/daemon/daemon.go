@@ -1,12 +1,17 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package daemon owns the Signal connection: it persists everything the
 // backend reports and serves clients over the unix socket.
 package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,8 +29,21 @@ import (
 type Config struct {
 	Socket         string
 	AttachmentsDir string
+	DBPath         string // for its size in stats
 	Version        string
+	// DeletedTTL is how long "This message was deleted." placeholders stay
+	// before they are removed (default DefaultDeletedTTL).
+	DeletedTTL time.Duration
+	// LinkPreview fetches a preview for an outgoing link (nil: none).
+	LinkPreview func(ctx context.Context, url string) (*model.OutgoingPreview, error)
+	// SweepInterval is how often disappearing messages and old placeholders
+	// are cleaned up (default 15s).
+	SweepInterval time.Duration
 }
+
+// DefaultDeletedTTL keeps a deleted message's placeholder for an hour: long
+// enough to notice something was deleted, not forever.
+const DefaultDeletedTTL = time.Hour
 
 type Daemon struct {
 	cfg  Config
@@ -36,6 +54,8 @@ type Daemon struct {
 	acct model.Account
 
 	mu         sync.Mutex
+	previews   map[string]cachedPreview // link previews fetched recently
+	history    *model.HistoryStatus     // message-history transfer, if one ran
 	conn       model.ConnState
 	connErr    string
 	queueEmpty bool
@@ -244,6 +264,17 @@ func (d *Daemon) onEvent(ctx context.Context, evt backend.Event) error {
 		}
 	case backend.TypingEvent:
 		d.broadcast(rpc.EvTyping, rpc.TypingEvent{Thread: e.Thread, Sender: e.Sender, Name: d.name(ctx, e.Sender), Typing: e.Typing})
+	case backend.HistoryEvent:
+		return d.onHistory(ctx, e)
+	case backend.DeleteForMeEvent:
+		return d.onDeleteForMe(ctx, e)
+	case backend.HistoryStatusEvent:
+		d.mu.Lock()
+		st := e.Status
+		d.history = &st
+		d.mu.Unlock()
+		d.log.Info().Str("state", st.State).Int("chats", st.Chats).Int("messages", st.Messages).Str("error", st.Error).Msg("History transfer")
+		d.broadcast(rpc.EvConnection, d.status())
 	case backend.TimerEvent:
 		if err := d.ensureThread(ctx, e.Thread); err != nil {
 			return err
@@ -329,6 +360,16 @@ func (d *Daemon) deleteMessage(ctx context.Context, thread model.ThreadID, autho
 	}
 	d.removeFiles(old)
 	d.broadcast(rpc.EvMessageUpdate, d.decorate(ctx, m))
+	// Replies quoting it lose the quoted text too.
+	ids, err := d.hist.ScrubQuotes(ctx, thread, author, ts)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if q, err := d.hist.Message(ctx, id); err == nil {
+			d.broadcast(rpc.EvMessageUpdate, d.decorate(ctx, q))
+		}
+	}
 	d.pushThread(ctx, thread)
 	return nil
 }
@@ -365,7 +406,39 @@ func (d *Daemon) status() rpc.StatusResult {
 	if d.srv != nil {
 		n = d.srv.NumConns()
 	}
-	return rpc.StatusResult{Account: d.acct, Connection: d.conn, Error: d.connErr, QueueEmpty: d.queueEmpty, Clients: n, Version: d.cfg.Version}
+	lp := true
+	if s, ok := d.be.(interface{ LinkPreviewsEnabled() bool }); ok {
+		lp = s.LinkPreviewsEnabled()
+	}
+	return rpc.StatusResult{Account: d.acct, Connection: d.conn, Error: d.connErr, QueueEmpty: d.queueEmpty, Clients: n, Version: d.cfg.Version, History: d.history, LinkPreviews: lp, Protocol: rpc.ProtocolVersion}
+}
+
+// onHistory stores one transferred conversation. Old messages are not
+// announced one by one (no notifications, no signal-cli receive events);
+// clients get the thread update and a "history" event to reload it.
+func (d *Daemon) onHistory(ctx context.Context, e backend.HistoryEvent) error {
+	if err := d.ensureThread(ctx, e.Thread); err != nil {
+		return err
+	}
+	n, err := d.hist.ImportHistory(ctx, e.Messages)
+	if err != nil {
+		return err
+	}
+	if e.ExpireTimer > 0 || e.ExpireVersion > 0 {
+		if err := d.hist.SetTimer(ctx, e.Thread, e.ExpireTimer, e.ExpireVersion); err != nil {
+			return err
+		}
+	}
+	if e.Archived {
+		if err := d.hist.SetArchived(ctx, e.Thread, true); err != nil {
+			return err
+		}
+	}
+	d.log.Info().Str("thread", string(e.Thread)).Int("messages", n).Msg("Imported history")
+	d.pushThread(ctx, e.Thread)
+	d.broadcast(rpc.EvHistory, rpc.HistoryImported{Thread: e.Thread, Messages: n})
+	d.wakeAttachments()
+	return nil
 }
 
 // nextTS returns a unique, increasing millisecond timestamp for sending.
@@ -394,13 +467,17 @@ func (d *Daemon) attachmentWorker(ctx context.Context) {
 	retry := time.NewTicker(5 * time.Minute)
 	defer retry.Stop()
 	d.wakeAttachments()
+	again := false
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-d.attachWake:
-		case <-retry.C:
+		if !again {
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.attachWake:
+			case <-retry.C:
+			}
 		}
+		again = false
 		pend, err := d.hist.PendingAttachments(ctx)
 		if err != nil {
 			d.log.Err(err).Msg("Listing pending attachments")
@@ -432,6 +509,16 @@ func (d *Daemon) attachmentWorker(ctx context.Context) {
 				d.log.Err(err).Msg("Updating attachment state")
 			}
 			touched[p.MessageID] = true
+			// New attachments (newest first) jump a long backlog, such as
+			// transferred history.
+			select {
+			case <-d.attachWake:
+				again = true
+			default:
+			}
+			if again {
+				break
+			}
 		}
 		for id := range touched {
 			m, err := d.hist.Message(ctx, id)
@@ -506,7 +593,14 @@ func extFor(ct string) string {
 }
 
 func (d *Daemon) expiryWorker(ctx context.Context) {
-	t := time.NewTicker(15 * time.Second)
+	every := d.cfg.SweepInterval
+	if every <= 0 {
+		every = 15 * time.Second
+		if ttl := d.cfg.DeletedTTL; ttl > 0 && ttl < 2*every {
+			every = ttl / 2
+		}
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
@@ -524,6 +618,32 @@ func (d *Daemon) expiryWorker(ctx context.Context) {
 				d.log.Err(err).Msg("Expiring message")
 			}
 		}
+		d.purgeDeleted(ctx)
+	}
+}
+
+// purgeDeleted removes deleted-message placeholders older than DeletedTTL
+// and tells clients to drop them.
+func (d *Daemon) purgeDeleted(ctx context.Context) {
+	ttl := d.cfg.DeletedTTL
+	if ttl <= 0 {
+		ttl = DefaultDeletedTTL
+	}
+	removed, err := d.hist.PurgeDeleted(ctx, time.Now().Add(-ttl).UnixMilli())
+	if err != nil {
+		d.log.Err(err).Msg("Purging deleted messages")
+		return
+	}
+	threads := map[model.ThreadID]bool{}
+	for _, r := range removed {
+		d.broadcast(rpc.EvMessageRemoved, rpc.MessageRemoved{ID: r.ID, Thread: r.Thread})
+		threads[r.Thread] = true
+	}
+	for t := range threads {
+		d.pushThread(ctx, t)
+	}
+	if len(removed) > 0 {
+		d.log.Debug().Int("count", len(removed)).Msg("Purged deleted-message placeholders")
 	}
 }
 
@@ -671,6 +791,14 @@ func (d *Daemon) handle(ctx context.Context, c *rpc.Conn, method string, params 
 		}
 		d.wakeAttachments()
 		return struct{}{}, nil
+	case rpc.MShutdown:
+		d.mu.Lock()
+		stop := d.stop
+		d.mu.Unlock()
+		d.log.Info().Msg("Shutdown requested by a client")
+		// Let the reply reach the client before the socket closes.
+		time.AfterFunc(300*time.Millisecond, stop)
+		return struct{}{}, nil
 	case rpc.MUnlink:
 		var p rpc.UnlinkParams
 		if err := decode(params, &p); err != nil {
@@ -691,6 +819,27 @@ func (d *Daemon) handle(ctx context.Context, c *rpc.Conn, method string, params 
 		// Let the reply reach the client before the socket closes.
 		time.AfterFunc(500*time.Millisecond, stop)
 		return struct{}{}, nil
+	case rpc.MStats:
+		return d.stats(ctx)
+	case rpc.MPurge:
+		var p rpc.PurgeParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return d.purge(ctx, p)
+	case rpc.MRetryFailed:
+		n, err := d.hist.RetryFailedAttachments(ctx)
+		if err != nil {
+			return nil, err
+		}
+		d.wakeAttachments()
+		return rpc.RetryFailedResult{Count: n}, nil
+	case rpc.MLinkPreview:
+		var p rpc.LinkPreviewParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return d.linkPreview(ctx, p.URL)
 	case "debugInject":
 		// Development only: the fake backend can inject incoming messages.
 		inj, ok := d.be.(interface{ Inject(backend.Event) error })
@@ -706,7 +855,17 @@ func (d *Daemon) handle(ctx context.Context, c *rpc.Conn, method string, params 
 		}
 		for i := range p.Message.Attachments {
 			if i < len(p.AttachmentData) {
-				p.Message.Attachments[i].Pointer = []byte(p.AttachmentData[i])
+				data := p.AttachmentData[i]
+				// "base64:…" carries binary content (the fake backend's
+				// download writes the pointer bytes as the file).
+				if b64, ok := strings.CutPrefix(data, "base64:"); ok {
+					raw, err := base64.StdEncoding.DecodeString(b64)
+					if err != nil {
+						return nil, rpc.Errorf(rpc.CodeInvalidParams, "attachmentData %d: %v", i, err)
+					}
+					data = string(raw)
+				}
+				p.Message.Attachments[i].Pointer = []byte(data)
 			}
 		}
 		if p.Message.TS == 0 {
@@ -777,6 +936,29 @@ func (d *Daemon) Send(ctx context.Context, out model.Outgoing) (*model.Message, 
 			ContentType: contentTypeFor(p),
 		})
 	}
+	// Link previews: kept only for an https link in the text, like Signal's
+	// apps (a bad one is dropped, not an error).
+	previews := out.Previews[:0:0]
+	for _, p := range out.Previews {
+		if !strings.HasPrefix(p.URL, "https://") || !strings.Contains(out.Body, p.URL) {
+			continue
+		}
+		lp := model.LinkPreview{URL: p.URL, Title: p.Title, Description: p.Description, Date: p.Date, Image: -1}
+		if p.Image != "" {
+			if st, err := os.Stat(p.Image); err == nil && !st.IsDir() {
+				lp.Image = len(m.Attachments)
+				m.Attachments = append(m.Attachments, model.Attachment{
+					Filename: "preview" + filepath.Ext(p.Image), Path: p.Image, Size: st.Size(), State: model.AttachmentDone,
+					ContentType: contentTypeFor(p.Image), Kind: model.AttachmentPreview,
+				})
+			} else {
+				p.Image = ""
+			}
+		}
+		m.Previews = append(m.Previews, lp)
+		previews = append(previews, p)
+	}
+	out.Previews = previews
 	if _, err := d.hist.InsertMessage(ctx, m); err != nil {
 		return nil, err
 	}
@@ -804,4 +986,185 @@ func (d *Daemon) Send(ctx context.Context, out model.Outgoing) (*model.Message, 
 		return full, sendErr
 	}
 	return full, nil
+}
+
+type cachedPreview struct {
+	p   *model.OutgoingPreview
+	err error
+	at  time.Time
+}
+
+// linkPreview fetches (or recalls) the preview for an outgoing link. Results
+// are cached briefly: every open compose box asks for the same link.
+func (d *Daemon) linkPreview(ctx context.Context, url string) (*model.OutgoingPreview, error) {
+	if d.cfg.LinkPreview == nil {
+		return nil, rpc.Errorf(rpc.CodeFailed, "link previews are not available")
+	}
+	d.mu.Lock()
+	c, ok := d.previews[url]
+	d.mu.Unlock()
+	if ok && time.Since(c.at) < 10*time.Minute {
+		if c.p != nil && c.p.Image != "" {
+			if _, err := os.Stat(c.p.Image); err != nil {
+				ok = false // image removed since; fetch again
+			}
+		}
+		if ok {
+			return c.p, c.err
+		}
+	}
+	fctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	p, err := d.cfg.LinkPreview(fctx, url)
+	if err != nil {
+		d.log.Debug().Err(err).Str("url", url).Msg("No link preview")
+		err = rpc.Errorf(rpc.CodeFailed, "no preview: %v", err)
+	}
+	d.mu.Lock()
+	if d.previews == nil {
+		d.previews = map[string]cachedPreview{}
+	}
+	for k, v := range d.previews {
+		if time.Since(v.at) > 10*time.Minute {
+			delete(d.previews, k)
+		}
+	}
+	d.previews[url] = cachedPreview{p: p, err: err, at: time.Now()}
+	d.mu.Unlock()
+	return p, err
+}
+
+func fileSize(p string) int64 {
+	if st, err := os.Stat(p); err == nil {
+		return st.Size()
+	}
+	return 0
+}
+
+func (d *Daemon) dbBytes() int64 {
+	if d.cfg.DBPath == "" {
+		return 0
+	}
+	return fileSize(d.cfg.DBPath) + fileSize(d.cfg.DBPath+"-wal")
+}
+
+func (d *Daemon) stats(ctx context.Context) (rpc.StatsResult, error) {
+	st, err := d.hist.Stats(ctx)
+	if err != nil {
+		return rpc.StatsResult{}, err
+	}
+	r := rpc.StatsResult{Stats: st, DataDir: filepath.Dir(d.cfg.AttachmentsDir), DBBytes: d.dbBytes()}
+	entries, _ := os.ReadDir(d.cfg.AttachmentsDir)
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
+			r.AttachmentFiles++
+			r.AttachmentBytes += info.Size()
+		}
+	}
+	return r, nil
+}
+
+// purge deletes old local history, removes the attachment files, compacts
+// the database and tells clients to reload the affected conversations.
+func (d *Daemon) purge(ctx context.Context, p rpc.PurgeParams) (rpc.PurgeResult, error) {
+	if p.Before <= 0 {
+		return rpc.PurgeResult{}, rpc.Errorf(rpc.CodeInvalidParams, "purge needs a cutoff time")
+	}
+	if p.AllDevices && !p.DryRun {
+		// Tell the other devices first: if that fails, nothing is deleted.
+		plan, err := d.hist.Purge(ctx, p.Before, p.Thread, true)
+		if err != nil {
+			return rpc.PurgeResult{}, err
+		}
+		if len(plan.Refs) > 0 {
+			deletes := make([]backend.MessageDelete, len(plan.Refs))
+			for i, r := range plan.Refs {
+				deletes[i] = backend.MessageDelete{Thread: r.Thread, Ref: r.MessageRef}
+			}
+			if err := d.be.DeleteForMe(ctx, deletes); err != nil {
+				return rpc.PurgeResult{}, rpc.Errorf(rpc.CodeFailed, "not deleted anywhere: telling the other devices failed: %v", err)
+			}
+			d.log.Info().Int("messages", len(deletes)).Msg("Sent delete-for-me to our other devices")
+		}
+	}
+	res, err := d.hist.Purge(ctx, p.Before, p.Thread, p.DryRun)
+	if err != nil {
+		return rpc.PurgeResult{}, err
+	}
+	out := rpc.PurgeResult{PurgeResult: res}
+	own := filepath.Clean(d.cfg.AttachmentsDir)
+	for _, path := range res.Paths {
+		if filepath.Dir(path) != own {
+			continue // files we sent from elsewhere stay where they are
+		}
+		out.Bytes += fileSize(path)
+		if !p.DryRun {
+			_ = os.Remove(path)
+		}
+	}
+	if p.DryRun {
+		return out, nil
+	}
+	if res.Messages > 0 {
+		if err := d.hist.Vacuum(ctx); err != nil {
+			d.log.Warn().Err(err).Msg("Compacting the database after purge")
+		}
+	}
+	out.DBBytesAfter = d.dbBytes()
+	d.log.Info().Int("messages", res.Messages).Int("attachments", res.Attachments).Int64("before", p.Before).Str("thread", string(p.Thread)).Msg("Purged history")
+	for _, t := range res.Threads {
+		d.pushThread(ctx, t)
+		d.broadcast(rpc.EvHistory, rpc.HistoryImported{Thread: t})
+	}
+	return out, nil
+}
+
+// onDeleteForMe applies a "delete for me" from another of our devices:
+// the messages (or conversations) go, without a placeholder.
+func (d *Daemon) onDeleteForMe(ctx context.Context, e backend.DeleteForMeEvent) error {
+	touched := map[model.ThreadID]bool{}
+	for _, md := range e.Messages {
+		m, err := d.hist.DeleteByRef(ctx, md.Thread, md.Ref)
+		if errors.Is(err, history.ErrNotFound) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		d.removeFiles(m)
+		d.broadcast(rpc.EvMessageRemoved, rpc.MessageRemoved{ID: m.ID, Thread: md.Thread})
+		touched[md.Thread] = true
+	}
+	removedThreads := false
+	for _, cd := range e.Conversations {
+		before := cd.Through + 1
+		if cd.Through == 0 {
+			before = math.MaxInt64
+		}
+		res, err := d.hist.Purge(ctx, before, cd.Thread, false)
+		if err != nil {
+			return err
+		}
+		for _, p := range res.Paths {
+			if filepath.Dir(p) == filepath.Clean(d.cfg.AttachmentsDir) {
+				_ = os.Remove(p)
+			}
+		}
+		if cd.Full {
+			if err := d.hist.DeleteThread(ctx, cd.Thread); err != nil {
+				return err
+			}
+			removedThreads = true
+		} else {
+			touched[cd.Thread] = true
+			d.broadcast(rpc.EvHistory, rpc.HistoryImported{Thread: cd.Thread})
+		}
+	}
+	for t := range touched {
+		d.pushThread(ctx, t)
+	}
+	if removedThreads {
+		d.broadcast(rpc.EvContacts, nil) // clients refetch the thread list
+	}
+	d.log.Info().Int("messages", len(e.Messages)).Int("conversations", len(e.Conversations)).Msg("Deleted for me (from another device)")
+	return nil
 }

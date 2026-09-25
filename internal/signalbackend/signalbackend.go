@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package signalbackend implements backend.Backend on top of signalmeow.
 package signalbackend
 
@@ -93,6 +96,17 @@ func (b *Backend) Account() model.Account {
 
 func (b *Backend) self() string { return b.dev.ACI.String() }
 
+// emit delivers an event to the daemon from outside signalmeow's callback.
+func (b *Backend) emit(ctx context.Context, e backend.Event) error {
+	b.mu.Lock()
+	h := b.handler
+	b.mu.Unlock()
+	if h == nil {
+		return errors.New("backend not running")
+	}
+	return h(ctx, e)
+}
+
 // Run connects and blocks until ctx is done or the device is logged out.
 func (b *Backend) Run(ctx context.Context, h backend.Handler) error {
 	ctx = b.log.WithContext(ctx)
@@ -125,7 +139,7 @@ func (b *Backend) Run(ctx context.Context, h backend.Handler) error {
 		}
 	}()
 
-	synced := false
+	synced, history := false, false
 	for {
 		select {
 		case <-ctx.Done():
@@ -147,6 +161,10 @@ func (b *Backend) Run(ctx context.Context, h backend.Handler) error {
 					// honours when sending.
 					synced = true
 					go b.cli.SyncStorage(ctx)
+				}
+				if !history {
+					history = true
+					go b.runHistory(ctx)
 				}
 			case signalmeow.SignalConnectionEventDisconnected:
 				emit(backend.ConnectionEvent{State: model.ConnDisconnected, Err: errStr})
@@ -196,6 +214,10 @@ func (b *Backend) onEvent(evt events.SignalEvent) bool {
 		out = append(out, backend.ReadSyncEvent{Refs: refs})
 	case *events.ContactList:
 		out = append(out, backend.ContactsEvent{})
+	case *events.DeleteForMe:
+		if e.SyncMessage_DeleteForMe != nil {
+			out = append(out, b.translateDeleteForMe(e.SyncMessage_DeleteForMe))
+		}
 	case *events.QueueEmpty:
 		out = append(out, backend.QueueEmptyEvent{})
 	case *events.LoggedOut:
@@ -292,13 +314,11 @@ func (b *Backend) translateData(ctx context.Context, thread model.ThreadID, send
 		evts = append(evts, backend.TimerEvent{Thread: thread, Seconds: dm.GetExpireTimer(), Version: dm.GetExpireTimerVersion()})
 	}
 	if flags&uint32(signalpb.DataMessage_EXPIRATION_TIMER_UPDATE) != 0 {
-		label := "off"
-		if s := dm.GetExpireTimer(); s > 0 {
-			label = (time.Duration(s) * time.Second).String()
-		}
+		// ⌛ rather than ⏱: the stopwatch is a text-presentation character
+		// that terminals squeeze into one cell.
 		evts = append(evts, backend.MessageEvent{Message: model.Message{
 			Thread: thread, Author: sender, TS: ts, ServerTS: serverTS,
-			Body: "⏱ disappearing messages: " + label,
+			Body: "⌛ disappearing messages: " + model.TimerLabel(dm.GetExpireTimer()),
 		}})
 		return evts
 	}
@@ -334,6 +354,14 @@ func (b *Backend) translateData(ctx context.Context, thread model.ThreadID, send
 			}
 			msg.Attachments = append(msg.Attachments, a)
 		}
+	}
+	for _, p := range dm.GetPreview() {
+		var img *model.Attachment
+		if p.GetImage() != nil {
+			a := attachmentFromPointer(p.GetImage())
+			img = &a
+		}
+		addPreview(&msg, p.GetUrl(), p.GetTitle(), p.GetDescription(), int64(p.GetDate()), img)
 	}
 	if msg.Body == "" && len(msg.Attachments) == 0 && msg.Sticker == "" {
 		switch {
@@ -463,6 +491,26 @@ func (b *Backend) Send(ctx context.Context, out model.Outgoing) error {
 			Text:            proto.String(q.Text),
 			Type:            signalpb.DataMessage_Quote_NORMAL.Enum(),
 		}
+	}
+	for _, p := range out.Previews {
+		pv := &signalpb.Preview{Url: proto.String(p.URL)}
+		if p.Title != "" {
+			pv.Title = proto.String(p.Title)
+		}
+		if p.Description != "" {
+			pv.Description = proto.String(p.Description)
+		}
+		if p.Date > 0 {
+			pv.Date = proto.Uint64(uint64(p.Date))
+		}
+		if p.Image != "" {
+			ptr, err := b.upload(ctx, p.Image)
+			if err != nil {
+				return fmt.Errorf("preview image: %w", err)
+			}
+			pv.Image = ptr
+		}
+		dm.Preview = append(dm.Preview, pv)
 	}
 	if dm.Body == nil && len(dm.Attachments) == 0 {
 		return errors.New("empty message")
@@ -740,8 +788,12 @@ func (b *Backend) resolveNumber(ctx context.Context, e164 string) (model.ThreadI
 }
 
 func (b *Backend) DownloadAttachment(ctx context.Context, pointer []byte, dest string) error {
+	raw, plaintextHash, err := unwrapPointer(pointer)
+	if err != nil {
+		return err
+	}
 	var ptr signalpb.AttachmentPointer
-	if err := proto.Unmarshal(pointer, &ptr); err != nil {
+	if err := proto.Unmarshal(raw, &ptr); err != nil {
 		return fmt.Errorf("bad attachment pointer: %w", err)
 	}
 	tmp := dest + ".part"
@@ -749,7 +801,7 @@ func (b *Backend) DownloadAttachment(ctx context.Context, pointer []byte, dest s
 	if err != nil {
 		return err
 	}
-	_, err = signalmeow.DownloadAttachmentWithPointer(ctx, &ptr, nil, f)
+	_, err = signalmeow.DownloadAttachmentWithPointer(ctx, &ptr, plaintextHash, f)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -778,4 +830,32 @@ func ForgetDevice(ctx context.Context, d *db.DB) error {
 		return err
 	}
 	return d.Signal.DeleteDevice(ctx, &dev.DeviceData)
+}
+
+// addPreview attaches a sender's link preview to m, the way Signal clients
+// accept them: only for an http(s) URL that appears in the message text.
+// Its image, if any, becomes an attachment of kind "preview".
+func addPreview(m *model.Message, url, title, description string, date int64, img *model.Attachment) {
+	if !(strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://")) || !strings.Contains(m.Body, url) {
+		return
+	}
+	p := model.LinkPreview{URL: url, Title: title, Description: description, Date: date, Image: -1}
+	if img != nil {
+		img.Kind = model.AttachmentPreview
+		if img.Filename == "" {
+			img.Filename = "preview"
+		}
+		p.Image = len(m.Attachments)
+		m.Attachments = append(m.Attachments, *img)
+	}
+	m.Previews = append(m.Previews, p)
+}
+
+// LinkPreviewsEnabled reports the account's "Generate link previews"
+// setting (synced from the storage service).
+func (b *Backend) LinkPreviewsEnabled() bool {
+	if r := b.dev.AccountRecord; r != nil {
+		return r.GetLinkPreviews()
+	}
+	return true // Signal's default
 }

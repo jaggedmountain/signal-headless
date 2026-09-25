@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package history persists threads and messages. Signal servers keep no
 // history, so this store is the only record of a conversation.
 package history
@@ -144,6 +147,15 @@ func (s *Store) InsertMessage(ctx context.Context, m *model.Message) (inserted b
 		var q model.Quote
 		if m.Quote != nil {
 			q = *m.Quote
+			// A reply can cross the deletion of what it quotes.
+			var deleted bool
+			err := s.db.QueryRow(ctx, `SELECT deleted FROM sh_message WHERE thread_id=$1 AND author=$2 AND ts=$3`, m.Thread, q.Author, q.TS).Scan(&deleted)
+			if err == nil && deleted {
+				q.Text = ""
+				m.Quote.Text = ""
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 		}
 		read := m.Read || m.Outgoing
 		var expireStart int64
@@ -175,9 +187,18 @@ func (s *Store) InsertMessage(ctx context.Context, m *model.Message) (inserted b
 				a.State = model.AttachmentPending
 			}
 			_, err = s.db.Exec(ctx, `
-				INSERT INTO sh_attachment (message_id, idx, content_type, filename, size, path, state, error, voice_note, pointer)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-				m.ID, i, a.ContentType, a.Filename, a.Size, a.Path, string(a.State), a.Error, a.VoiceNote, a.Pointer)
+				INSERT INTO sh_attachment (message_id, idx, content_type, filename, size, path, state, error, voice_note, pointer, kind)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+				m.ID, i, a.ContentType, a.Filename, a.Size, a.Path, string(a.State), a.Error, a.VoiceNote, a.Pointer, a.Kind)
+			if err != nil {
+				return err
+			}
+		}
+		for i, p := range m.Previews {
+			_, err = s.db.Exec(ctx, `
+				INSERT INTO sh_preview (message_id, idx, url, title, description, date, image_idx)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				m.ID, i, p.URL, p.Title, p.Description, p.Date, p.Image)
 			if err != nil {
 				return err
 			}
@@ -219,7 +240,7 @@ func (s *Store) fillDetails(ctx context.Context, msgs []*model.Message, withPoin
 	}
 	in := strings.Join(ids, ",")
 	rows, err := s.db.Query(ctx, `
-		SELECT message_id, idx, content_type, filename, size, path, state, error, voice_note, pointer
+		SELECT message_id, idx, content_type, filename, size, path, state, error, voice_note, pointer, kind
 		FROM sh_attachment WHERE message_id IN (`+in+`) ORDER BY message_id, idx`)
 	if err != nil {
 		return err
@@ -227,7 +248,7 @@ func (s *Store) fillDetails(ctx context.Context, msgs []*model.Message, withPoin
 	for rows.Next() {
 		var id int64
 		var a model.Attachment
-		if err := rows.Scan(&id, &a.Index, &a.ContentType, &a.Filename, &a.Size, &a.Path, &a.State, &a.Error, &a.VoiceNote, &a.Pointer); err != nil {
+		if err := rows.Scan(&id, &a.Index, &a.ContentType, &a.Filename, &a.Size, &a.Path, &a.State, &a.Error, &a.VoiceNote, &a.Pointer, &a.Kind); err != nil {
 			rows.Close()
 			return err
 		}
@@ -235,6 +256,20 @@ func (s *Store) fillDetails(ctx context.Context, msgs []*model.Message, withPoin
 			a.Pointer = nil
 		}
 		byID[id].Attachments = append(byID[id].Attachments, a)
+	}
+	rows.Close()
+	rows, err = s.db.Query(ctx, `SELECT message_id, url, title, description, date, image_idx FROM sh_preview WHERE message_id IN (`+in+`) ORDER BY message_id, idx`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var p model.LinkPreview
+		if err := rows.Scan(&id, &p.URL, &p.Title, &p.Description, &p.Date, &p.Image); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[id].Previews = append(byID[id].Previews, p)
 	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `SELECT message_id, reactor, emoji, ts FROM sh_reaction WHERE message_id IN (`+in+`) ORDER BY ts`)
@@ -365,10 +400,13 @@ func (s *Store) ApplyDelete(ctx context.Context, thread model.ThreadID, author s
 		return nil, err
 	}
 	err = s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
-		if _, err := s.db.Exec(ctx, `UPDATE sh_message SET deleted=1, body='', quote_text='' WHERE id=$1`, m.ID); err != nil {
+		if _, err := s.db.Exec(ctx, `UPDATE sh_message SET deleted=1, deleted_at=$2, body='', quote_text='' WHERE id=$1`, m.ID, time.Now().UnixMilli()); err != nil {
 			return err
 		}
 		if _, err := s.db.Exec(ctx, `DELETE FROM sh_reaction WHERE message_id=$1`, m.ID); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(ctx, `DELETE FROM sh_preview WHERE message_id=$1`, m.ID); err != nil {
 			return err
 		}
 		_, err := s.db.Exec(ctx, `DELETE FROM sh_attachment WHERE message_id=$1`, m.ID)
@@ -503,7 +541,8 @@ func (s *Store) PendingAttachments(ctx context.Context) ([]PendingAttachment, er
 	rows, err := s.db.Query(ctx, `
 		SELECT a.message_id, m.thread_id, m.ts, a.idx, a.content_type, a.filename, a.size, a.voice_note, a.pointer
 		FROM sh_attachment a JOIN sh_message m ON m.id = a.message_id
-		WHERE a.state = 'pending' AND a.pointer IS NOT NULL ORDER BY a.message_id, a.idx`)
+		WHERE a.state = 'pending' AND a.pointer IS NOT NULL
+		ORDER BY m.ts DESC, a.message_id, a.idx`) // newest first: live media before a history backlog
 	if err != nil {
 		return nil, err
 	}
@@ -544,4 +583,242 @@ func (s *Store) Expired(ctx context.Context, now int64) ([]*model.Message, error
 	}
 	rows.Close()
 	return out, s.fillDetails(ctx, out, false)
+}
+
+// Removed identifies a message row that no longer exists.
+type Removed struct {
+	ID     int64          `json:"id"`
+	Thread model.ThreadID `json:"thread"`
+}
+
+// PurgeDeleted removes the placeholders of messages deleted at or before
+// before (ms), returning what it removed.
+func (s *Store) PurgeDeleted(ctx context.Context, before int64) ([]Removed, error) {
+	var out []Removed
+	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		rows, err := s.db.Query(ctx, `SELECT id, thread_id FROM sh_message WHERE deleted = 1 AND deleted_at <= $1`, before)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var r Removed
+			if err := rows.Scan(&r.ID, &r.Thread); err != nil {
+				rows.Close()
+				return err
+			}
+			out = append(out, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		_, err = s.db.Exec(ctx, `DELETE FROM sh_message WHERE deleted = 1 AND deleted_at <= $1`, before)
+		return err
+	})
+	return out, err
+}
+
+// ScrubQuotes clears the quoted text in messages that quote the given
+// (deleted) message, returning their IDs.
+func (s *Store) ScrubQuotes(ctx context.Context, thread model.ThreadID, author string, ts int64) ([]int64, error) {
+	rows, err := s.db.Query(ctx, `SELECT id FROM sh_message WHERE thread_id=$1 AND quote_author=$2 AND quote_ts=$3 AND quote_text != ''`, thread, author, ts)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if _, err := s.db.Exec(ctx, `UPDATE sh_message SET quote_text='' WHERE id=$1`, id); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// ImportHistory stores transferred messages in one transaction, with their
+// reactions and edit markers. Messages already present are left alone.
+// It returns how many were new.
+func (s *Store) ImportHistory(ctx context.Context, msgs []model.Message) (int, error) {
+	n := 0
+	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		for i := range msgs {
+			m := &msgs[i]
+			inserted, err := s.InsertMessage(ctx, m)
+			if err != nil {
+				return err
+			}
+			if !inserted {
+				continue
+			}
+			n++
+			if m.EditedAt != 0 {
+				if _, err := s.db.Exec(ctx, `UPDATE sh_message SET edited_at=$2 WHERE id=$1`, m.ID, m.EditedAt); err != nil {
+					return err
+				}
+			}
+			for _, r := range m.Reactions {
+				if _, err := s.db.Exec(ctx, `
+					INSERT INTO sh_reaction (message_id, reactor, emoji, ts) VALUES ($1, $2, $3, $4)
+					ON CONFLICT (message_id, reactor) DO NOTHING`, m.ID, r.Reactor, r.Emoji, r.TS); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	return n, err
+}
+
+// Stats are counts over the stored history.
+type Stats struct {
+	Threads            int   `json:"threads"`
+	Messages           int   `json:"messages"`
+	Attachments        int   `json:"attachments"`
+	AttachmentsPending int   `json:"attachmentsPending"`
+	AttachmentsFailed  int   `json:"attachmentsFailed"`
+	Reactions          int   `json:"reactions"`
+	OldestTS           int64 `json:"oldestTs,omitempty"`
+	NewestTS           int64 `json:"newestTs,omitempty"`
+}
+
+func (s *Store) Stats(ctx context.Context) (Stats, error) {
+	var st Stats
+	err := s.db.QueryRow(ctx, `SELECT
+		(SELECT COUNT(*) FROM sh_thread),
+		(SELECT COUNT(*) FROM sh_message),
+		(SELECT COUNT(*) FROM sh_attachment),
+		(SELECT COUNT(*) FROM sh_attachment WHERE state = 'pending'),
+		(SELECT COUNT(*) FROM sh_attachment WHERE state = 'failed'),
+		(SELECT COUNT(*) FROM sh_reaction),
+		COALESCE((SELECT MIN(ts) FROM sh_message), 0),
+		COALESCE((SELECT MAX(ts) FROM sh_message), 0)`).Scan(
+		&st.Threads, &st.Messages, &st.Attachments, &st.AttachmentsPending, &st.AttachmentsFailed, &st.Reactions, &st.OldestTS, &st.NewestTS)
+	return st, err
+}
+
+// PurgeResult describes what a purge removed (or would remove).
+type PurgeResult struct {
+	Messages    int              `json:"messages"`
+	Attachments int              `json:"attachments"`
+	Threads     []model.ThreadID `json:"threads,omitempty"` // conversations that lost messages
+	Paths       []string         `json:"-"`                 // attachment files to delete
+	Refs        []ThreadRef      `json:"-"`                 // the messages (for delete-for-me sync)
+}
+
+// ThreadRef names a message by conversation, author and sent timestamp.
+type ThreadRef struct {
+	Thread model.ThreadID
+	model.MessageRef
+}
+
+// Purge deletes messages sent before `before` (ms), in one conversation or
+// all, with their attachments, reactions and previews. With dryRun it only
+// counts. Conversations themselves (titles, timers) are kept.
+func (s *Store) Purge(ctx context.Context, before int64, thread model.ThreadID, dryRun bool) (PurgeResult, error) {
+	var r PurgeResult
+	where := `m.ts < $1`
+	args := []any{before}
+	if thread != "" {
+		where += ` AND m.thread_id = $2`
+		args = append(args, string(thread))
+	}
+	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM sh_message m WHERE `+where, args...).Scan(&r.Messages); err != nil {
+			return err
+		}
+		rows, err := s.db.Query(ctx, `SELECT a.path FROM sh_attachment a JOIN sh_message m ON m.id = a.message_id WHERE `+where, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				rows.Close()
+				return err
+			}
+			r.Attachments++
+			if p != "" {
+				r.Paths = append(r.Paths, p)
+			}
+		}
+		rows.Close()
+		rows, err = s.db.Query(ctx, `SELECT m.thread_id, m.author, m.ts FROM sh_message m WHERE `+where+` AND m.deleted = 0`, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var ref ThreadRef
+			if err := rows.Scan(&ref.Thread, &ref.Author, &ref.TS); err != nil {
+				rows.Close()
+				return err
+			}
+			r.Refs = append(r.Refs, ref)
+		}
+		rows.Close()
+		rows, err = s.db.Query(ctx, `SELECT DISTINCT m.thread_id FROM sh_message m WHERE `+where, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var t model.ThreadID
+			if err := rows.Scan(&t); err != nil {
+				rows.Close()
+				return err
+			}
+			r.Threads = append(r.Threads, t)
+		}
+		rows.Close()
+		if dryRun {
+			return nil
+		}
+		_, err = s.db.Exec(ctx, `DELETE FROM sh_message WHERE id IN (SELECT m.id FROM sh_message m WHERE `+where+`)`, args...)
+		return err
+	})
+	return r, err
+}
+
+// Vacuum rebuilds the database file so space freed by deletions is returned.
+func (s *Store) Vacuum(ctx context.Context) error {
+	_, err := s.db.Exec(ctx, `VACUUM`)
+	return err
+}
+
+// RetryFailedAttachments marks every failed download for another try.
+func (s *Store) RetryFailedAttachments(ctx context.Context) (int, error) {
+	res, err := s.db.Exec(ctx, `UPDATE sh_attachment SET state = 'pending', error = '' WHERE state = 'failed' AND pointer IS NOT NULL`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// DeleteByRef removes one message outright (no placeholder), returning it
+// (with attachment paths) for file cleanup. ErrNotFound if absent.
+func (s *Store) DeleteByRef(ctx context.Context, thread model.ThreadID, ref model.MessageRef) (*model.Message, error) {
+	m, err := s.MessageByRef(ctx, thread, ref)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(ctx, `DELETE FROM sh_message WHERE id=$1`, m.ID); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// DeleteThread removes a conversation and everything in it.
+func (s *Store) DeleteThread(ctx context.Context, thread model.ThreadID) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM sh_thread WHERE id=$1`, string(thread))
+	return err
 }

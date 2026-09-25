@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package rpc is the daemon's client protocol: newline-delimited JSON-RPC 2.0
 // over a unix socket, framed like signal-cli's jsonRpc mode.
 package rpc

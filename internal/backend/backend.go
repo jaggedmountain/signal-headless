@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package backend defines the boundary between the daemon and Signal.
 //
 // The real implementation (package signalbackend) wraps signalmeow; package
@@ -44,6 +47,9 @@ type Backend interface {
 
 	// DownloadAttachment fetches and decrypts an attachment into dest.
 	DownloadAttachment(ctx context.Context, pointer []byte, dest string) error
+	// DeleteForMe asks the account's other devices (the phone too) to delete
+	// these messages for us; the other side keeps them.
+	DeleteForMe(ctx context.Context, deletes []MessageDelete) error
 }
 
 // Event is one of the *Event types below.
@@ -119,14 +125,54 @@ type ContactsEvent struct{}
 // QueueEmptyEvent is sent once the server has delivered all queued messages.
 type QueueEmptyEvent struct{}
 
-func (MessageEvent) isEvent()    {}
-func (EditEvent) isEvent()       {}
-func (DeleteEvent) isEvent()     {}
-func (ReactionEvent) isEvent()   {}
-func (ReceiptEvent) isEvent()    {}
-func (ReadSyncEvent) isEvent()   {}
-func (TypingEvent) isEvent()     {}
-func (ConnectionEvent) isEvent() {}
-func (ContactsEvent) isEvent()   {}
-func (TimerEvent) isEvent()      {}
-func (QueueEmptyEvent) isEvent() {}
+// HistoryEvent carries one conversation's transferred message history
+// (after linking with "Transfer message history"). Messages are old: they
+// are stored, not announced.
+type HistoryEvent struct {
+	Thread        model.ThreadID
+	Kind          model.ThreadKind
+	Archived      bool
+	ExpireTimer   uint32
+	ExpireVersion uint32
+	Messages      []model.Message
+}
+
+// MessageDelete names one message in a conversation for "delete for me".
+type MessageDelete struct {
+	Thread model.ThreadID
+	Ref    model.MessageRef
+}
+
+// ConversationDelete: another of our devices cleared a conversation. Through
+// is the newest sent timestamp to delete (0: everything); Full also removes
+// the conversation itself.
+type ConversationDelete struct {
+	Thread  model.ThreadID
+	Through int64
+	Full    bool
+}
+
+// DeleteForMeEvent: another of our devices deleted messages "for me" (only
+// from the account's own devices, not for the other side).
+type DeleteForMeEvent struct {
+	Messages      []MessageDelete
+	Conversations []ConversationDelete
+}
+
+// HistoryStatusEvent reports progress of the history transfer.
+type HistoryStatusEvent struct{ Status model.HistoryStatus }
+
+func (MessageEvent) isEvent()       {}
+func (EditEvent) isEvent()          {}
+func (DeleteEvent) isEvent()        {}
+func (ReactionEvent) isEvent()      {}
+func (ReceiptEvent) isEvent()       {}
+func (ReadSyncEvent) isEvent()      {}
+func (TypingEvent) isEvent()        {}
+func (ConnectionEvent) isEvent()    {}
+func (ContactsEvent) isEvent()      {}
+func (TimerEvent) isEvent()         {}
+func (QueueEmptyEvent) isEvent()    {}
+func (HistoryEvent) isEvent()       {}
+func (HistoryStatusEvent) isEvent() {}
+func (DeleteForMeEvent) isEvent()   {}

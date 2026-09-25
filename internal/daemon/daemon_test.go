@@ -1,8 +1,13 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package daemon
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +32,7 @@ type env struct {
 	done chan struct{}
 }
 
-func start(t *testing.T) *env {
+func start(t *testing.T, opts ...func(*Config)) *env {
 	t.Helper()
 	dir := t.TempDir()
 	database, err := db.Open(context.Background(), filepath.Join(dir, "t.db"), zerolog.Nop())
@@ -38,7 +43,11 @@ func start(t *testing.T) *env {
 	att := filepath.Join(dir, "attachments")
 	os.MkdirAll(att, 0o700)
 	sock := filepath.Join(dir, "d.sock")
-	d := New(Config{Socket: sock, AttachmentsDir: att, Version: "test"}, fake, history.New(database.Database), zerolog.Nop())
+	cfg := Config{Socket: sock, AttachmentsDir: att, Version: "test"}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	d := New(cfg, fake, history.New(database.Database), zerolog.Nop())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { d.Run(ctx); close(done) }()
@@ -311,5 +320,281 @@ func TestUnlink(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("unlink calls = %d", n)
+	}
+}
+
+func TestDeletedPlaceholdersExpire(t *testing.T) {
+	e := start(t, func(c *Config) {
+		c.DeletedTTL = 300 * time.Millisecond
+		c.SweepInterval = 50 * time.Millisecond
+	})
+	c := e.dial(true)
+	alice := model.ThreadID(fakebackend.AliceACI)
+	e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: alice, Author: fakebackend.AliceACI, TS: 1000, Body: "oops"}})
+	e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: alice, Author: fakebackend.AliceACI, TS: 2000, Body: "stays"}})
+	var gone model.Message
+	json.Unmarshal(next(t, c, rpc.EvMessage), &gone)
+	e.fake.Inject(backend.DeleteEvent{Thread: alice, Author: fakebackend.AliceACI, TargetTS: 1000})
+
+	var msgs []model.Message
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: alice}, &msgs)
+	if len(msgs) != 2 || !msgs[0].Deleted {
+		t.Fatalf("placeholder should show first: %+v", msgs)
+	}
+	var r rpc.MessageRemoved
+	json.Unmarshal(next(t, c, rpc.EvMessageRemoved), &r)
+	if r.ID != gone.ID || r.Thread != alice {
+		t.Fatalf("removed = %+v, want id %d", r, gone.ID)
+	}
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: alice}, &msgs)
+	if len(msgs) != 1 || msgs[0].Body != "stays" {
+		t.Fatalf("after purge: %+v", msgs)
+	}
+}
+
+func TestHistoryImportIsQuiet(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	compat := e.dial(false)
+	alice := model.ThreadID(fakebackend.AliceACI)
+	e.fake.Inject(backend.HistoryStatusEvent{Status: model.HistoryStatus{State: "importing"}})
+	err := e.fake.Inject(backend.HistoryEvent{Thread: alice, Kind: model.Direct, Archived: true, ExpireTimer: 60, ExpireVersion: 1, Messages: []model.Message{
+		{Thread: alice, Author: fakebackend.AliceACI, TS: 100, Body: "old news", Read: true,
+			Reactions: []model.Reaction{{Reactor: fakebackend.SelfACI, Emoji: "👍", TS: 101}}},
+		{Thread: alice, Author: fakebackend.SelfACI, TS: 200, Body: "old reply", Outgoing: true, Status: model.StatusRead},
+		{Thread: alice, Author: fakebackend.AliceACI, TS: 300, Body: "unread one",
+			Attachments: []model.Attachment{{Filename: "a.txt", State: model.AttachmentPending, Pointer: []byte("data")}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h rpc.HistoryImported
+	json.Unmarshal(next(t, c, rpc.EvHistory), &h)
+	if h.Thread != alice || h.Messages != 3 {
+		t.Fatalf("history event = %+v", h)
+	}
+	var msgs []model.Message
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: alice}, &msgs)
+	if len(msgs) != 3 || len(msgs[0].Reactions) != 1 || msgs[1].Status != model.StatusRead {
+		t.Fatalf("messages = %+v", msgs)
+	}
+	var th model.Thread
+	e.call(c, rpc.MGetThread, rpc.ThreadParams{Thread: alice}, &th)
+	if !th.Archived || th.ExpireTimer != 60 || th.Unread != 1 {
+		t.Fatalf("thread = %+v", th)
+	}
+	var st rpc.StatusResult
+	e.call(c, rpc.MStatus, nil, &st)
+	if st.History == nil || st.History.State != "importing" {
+		t.Fatalf("status history = %+v", st.History)
+	}
+	// Attachments of imported messages download like any other.
+	for {
+		var u model.Message
+		json.Unmarshal(next(t, c, rpc.EvMessageUpdate), &u)
+		if u.TS == 300 && len(u.Attachments) == 1 && u.Attachments[0].State == model.AttachmentDone {
+			break
+		}
+	}
+	// Old messages are not announced: no native message events, no
+	// signal-cli receive envelopes.
+	drain := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case n := <-c.Notifications():
+			if n.Method == rpc.EvMessage {
+				t.Fatalf("history announced as a new message: %s", n.Params)
+			}
+		case n := <-compat.Notifications():
+			if n.Method == rpc.EvReceive {
+				t.Fatalf("history sent to signal-cli clients: %s", n.Params)
+			}
+		case <-drain:
+			return
+		}
+	}
+}
+
+func TestOutgoingLinkPreview(t *testing.T) {
+	e := start(t, func(c *Config) { c.LinkPreview = fakebackend.LinkPreview(c.AttachmentsDir) })
+	c := e.dial(true)
+	url := "https://tea.example/brew"
+	var p model.OutgoingPreview
+	e.call(c, rpc.MLinkPreview, rpc.LinkPreviewParams{URL: url}, &p)
+	if p.Title != "Preview of tea.example" || p.Image == "" {
+		t.Fatalf("preview = %+v", p)
+	}
+	if err := c.Call(context.Background(), rpc.MLinkPreview, rpc.LinkPreviewParams{URL: "https://tea.example/nopreview"}, nil); err == nil {
+		t.Fatal("expected no preview")
+	}
+	var st rpc.StatusResult
+	e.call(c, rpc.MStatus, nil, &st)
+	if !st.LinkPreviews {
+		t.Fatal("status should carry the account's link-preview setting")
+	}
+	var sr rpc.SendResult
+	e.call(c, rpc.MSend, rpc.SendParams{Thread: fakebackend.BobACI, Body: "read this " + url,
+		Previews: []model.OutgoingPreview{p, {URL: "https://not-in-the-text.example/", Title: "dropped"}}}, &sr)
+	m := sr.Message
+	if len(m.Previews) != 1 || m.Previews[0].URL != url || m.Previews[0].Image != 0 {
+		t.Fatalf("stored previews = %+v", m.Previews)
+	}
+	if len(m.Attachments) != 1 || m.Attachments[0].Kind != model.AttachmentPreview || m.Attachments[0].Path != p.Image {
+		t.Fatalf("stored attachments = %+v", m.Attachments)
+	}
+	var sent model.Outgoing
+	for _, s := range e.fake.Sent() {
+		if s.Kind == "message" {
+			sent = s.Out
+		}
+	}
+	if len(sent.Previews) != 1 || sent.Previews[0].Image != p.Image {
+		t.Fatalf("backend got previews %+v", sent.Previews)
+	}
+}
+
+func TestPurgeRemovesFilesAndNotifies(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	bob := model.ThreadID(fakebackend.BobACI)
+	e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: bob, Author: fakebackend.BobACI, TS: 1000, Body: "ancient",
+		Attachments: []model.Attachment{{Filename: "old.txt", Pointer: []byte("0123456789")}}}})
+	e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: bob, Author: fakebackend.BobACI, TS: time.Now().UnixMilli(), Body: "fresh"}})
+	var path string
+	for path == "" {
+		var u model.Message
+		json.Unmarshal(next(t, c, rpc.EvMessageUpdate), &u)
+		if u.TS == 1000 && len(u.Attachments) == 1 && u.Attachments[0].State == model.AttachmentDone {
+			path = u.Attachments[0].Path
+		}
+	}
+	var st rpc.StatsResult
+	e.call(c, rpc.MStats, nil, &st)
+	if st.Messages != 2 || st.AttachmentFiles != 1 || st.AttachmentBytes != 10 {
+		t.Fatalf("stats = %+v", st)
+	}
+	cutoff := time.Now().Add(-time.Hour).UnixMilli()
+	var dry rpc.PurgeResult
+	e.call(c, rpc.MPurge, rpc.PurgeParams{Before: cutoff, DryRun: true}, &dry)
+	if dry.Messages != 1 || dry.Bytes != 10 {
+		t.Fatalf("dry run = %+v", dry)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("dry run removed the file")
+	}
+	var r rpc.PurgeResult
+	e.call(c, rpc.MPurge, rpc.PurgeParams{Before: cutoff}, &r)
+	if r.Messages != 1 || r.Bytes != 10 {
+		t.Fatalf("purge = %+v", r)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("attachment file kept")
+	}
+	var h rpc.HistoryImported
+	json.Unmarshal(next(t, c, rpc.EvHistory), &h)
+	if h.Thread != bob {
+		t.Fatalf("reload event = %+v", h)
+	}
+	var msgs []model.Message
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: bob}, &msgs)
+	if len(msgs) != 1 || msgs[0].Body != "fresh" {
+		t.Fatalf("left = %+v", msgs)
+	}
+	if err := c.Call(context.Background(), rpc.MPurge, rpc.PurgeParams{}, nil); err == nil {
+		t.Fatal("purge without a cutoff must fail")
+	}
+}
+
+func TestPurgeAllDevices(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	bob := model.ThreadID(fakebackend.BobACI)
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: bob, Author: fakebackend.BobACI, TS: old, Body: "old one"}})
+	e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: bob, Author: fakebackend.SelfACI, TS: old + 1, Body: "old reply", Outgoing: true}})
+	e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: bob, Author: fakebackend.BobACI, TS: time.Now().UnixMilli(), Body: "new"}})
+	cutoff := time.Now().Add(-time.Hour).UnixMilli()
+
+	// If the other devices can't be told, nothing is deleted here either.
+	e.fake.DeleteErr = errors.New("offline")
+	if err := c.Call(context.Background(), rpc.MPurge, rpc.PurgeParams{Before: cutoff, AllDevices: true}, nil); err == nil {
+		t.Fatal("expected failure")
+	}
+	var msgs []model.Message
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: bob}, &msgs)
+	if len(msgs) != 3 {
+		t.Fatalf("deleted despite failed sync: %d left", len(msgs))
+	}
+	e.fake.DeleteErr = nil
+
+	var r rpc.PurgeResult
+	e.call(c, rpc.MPurge, rpc.PurgeParams{Before: cutoff, AllDevices: true}, &r)
+	if r.Messages != 2 {
+		t.Fatalf("purge = %+v", r)
+	}
+	var sync *fakebackend.Sent
+	for _, s := range e.fake.Sent() {
+		if s.Kind == "deleteForMe" {
+			s := s
+			sync = &s
+		}
+	}
+	if sync == nil || len(sync.Deletes) != 2 || sync.Deletes[0].Thread != bob {
+		t.Fatalf("delete-for-me sync = %+v", sync)
+	}
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: bob}, &msgs)
+	if len(msgs) != 1 || msgs[0].Body != "new" {
+		t.Fatalf("left = %+v", msgs)
+	}
+}
+
+func TestDeleteForMeFromPhone(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	alice, bob := model.ThreadID(fakebackend.AliceACI), model.ThreadID(fakebackend.BobACI)
+	for i, th := range []model.ThreadID{alice, alice, alice, bob} {
+		e.fake.Inject(backend.MessageEvent{Message: model.Message{Thread: th, Author: string(th), TS: int64(100 + i), Body: fmt.Sprint("m", i)}})
+	}
+	var first model.Message
+	json.Unmarshal(next(t, c, rpc.EvMessage), &first)
+	err := e.fake.Inject(backend.DeleteForMeEvent{
+		Messages:      []backend.MessageDelete{{Thread: alice, Ref: model.MessageRef{Author: string(alice), TS: 100}}},
+		Conversations: []backend.ConversationDelete{{Thread: alice, Through: 101}, {Thread: bob, Full: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r rpc.MessageRemoved
+	json.Unmarshal(next(t, c, rpc.EvMessageRemoved), &r)
+	if r.ID != first.ID {
+		t.Fatalf("removed %+v, want id %d", r, first.ID)
+	}
+	var msgs []model.Message
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: alice}, &msgs)
+	if len(msgs) != 1 || msgs[0].TS != 102 {
+		t.Fatalf("alice left = %+v", msgs)
+	}
+	var threads []model.Thread
+	e.call(c, rpc.MListThreads, nil, &threads)
+	for _, th := range threads {
+		if th.ID == bob {
+			t.Fatal("fully deleted conversation still listed")
+		}
+	}
+}
+
+func TestProtocolAndShutdown(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	var st rpc.StatusResult
+	e.call(c, rpc.MStatus, nil, &st)
+	if st.Protocol != rpc.ProtocolVersion || st.Protocol < 1 {
+		t.Fatalf("protocol = %d", st.Protocol)
+	}
+	e.call(c, rpc.MShutdown, nil, nil)
+	select {
+	case <-e.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop")
 	}
 }

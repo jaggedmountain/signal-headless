@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package main
 
 import (
@@ -10,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"signal-headless/internal/backend"
@@ -19,6 +21,8 @@ import (
 	"signal-headless/internal/fakebackend"
 	"signal-headless/internal/history"
 	"signal-headless/internal/importer"
+	"signal-headless/internal/linkpreview"
+	"signal-headless/internal/model"
 	"signal-headless/internal/paths"
 	"signal-headless/internal/rpc"
 	"signal-headless/internal/signalbackend"
@@ -36,13 +40,14 @@ func resolvePaths(o *options) paths.Paths {
 	return paths.Resolve(o.dataDir, o.socket)
 }
 
-// lockDataDir takes an exclusive lock so only one daemon runs per store.
+// lockDataDir takes an exclusive lock so only one daemon runs per store
+// (lockFile is per platform).
 func lockDataDir(p paths.Paths) (*os.File, error) {
 	f, err := os.OpenFile(filepath.Join(p.DataDir, "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockFile(f); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("another daemon is using %s", p.DataDir)
 	}
@@ -94,8 +99,20 @@ func runDaemon(ctx context.Context, o *options, p paths.Paths) error {
 		}
 		be = sb
 	}
-	dmn := daemon.New(daemon.Config{Socket: p.Socket, AttachmentsDir: p.Attachments(), Version: version},
-		be, history.New(d.Database), log)
+	cfg := daemon.Config{Socket: p.Socket, AttachmentsDir: p.Attachments(), DBPath: p.DB(), Version: version, DeletedTTL: o.deletedTTL}
+	if o.fake {
+		cfg.LinkPreview = fakebackend.LinkPreview(p.Attachments())
+	} else {
+		f := &linkpreview.Fetcher{Dir: p.Attachments()}
+		cfg.LinkPreview = func(ctx context.Context, url string) (*model.OutgoingPreview, error) {
+			lp, err := f.Fetch(ctx, url)
+			if err != nil {
+				return nil, err
+			}
+			return &model.OutgoingPreview{URL: lp.URL, Title: lp.Title, Description: lp.Description, Date: lp.Date, Image: lp.Image}, nil
+		}
+	}
+	dmn := daemon.New(cfg, be, history.New(d.Database), log)
 	runCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	if !o.fake {
@@ -156,7 +173,7 @@ func startDaemon(ctx context.Context, o *options, p paths.Paths) error {
 		args = append(args, "-v")
 	}
 	cmd := exec.Command(exe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	detach(cmd) // outlives this process and its terminal
 	var stderr strings.Builder
 	cmd.Stderr = &limitedWriter{w: &stderr, n: 4096}
 	if err := cmd.Start(); err != nil {
@@ -275,4 +292,23 @@ func runBridge(ctx context.Context, o *options, p paths.Paths) error {
 		}
 		return nil
 	}
+}
+
+// runStop asks the running daemon to exit.
+func runStop(ctx context.Context, o *options, p paths.Paths) error {
+	c, err := connect(ctx, o, p, false)
+	if err != nil {
+		fmt.Println("no daemon running")
+		return nil
+	}
+	defer c.Close()
+	if err := c.Call(ctx, rpc.MShutdown, nil, nil); err != nil {
+		var re *rpc.Error
+		if errors.As(err, &re) && re.Code == rpc.CodeMethodNotFound {
+			return errors.New("this daemon predates --stop; stop it with: pkill -x signal-headless")
+		}
+		return err
+	}
+	fmt.Println("daemon stopping")
+	return nil
 }

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package db opens the single SQLite file that holds both signalmeow's
 // protocol state (keys, sessions, recipients) and our message history.
 package db
@@ -104,6 +107,24 @@ var historySchema = []string{
 		emoji      TEXT NOT NULL,
 		ts         INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (message_id, reactor)
+	);`,
+	// v2: when a message was deleted, so its placeholder can be purged later.
+	// Placeholders from before this version get the upgrade time.
+	`ALTER TABLE sh_message ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0;
+	UPDATE sh_message SET deleted_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 WHERE deleted = 1;
+	CREATE INDEX sh_message_deleted ON sh_message (deleted_at) WHERE deleted = 1;`,
+	// v3: link previews sent with messages; their images are attachments
+	// of kind 'preview'.
+	`ALTER TABLE sh_attachment ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+	CREATE TABLE sh_preview (
+		message_id  INTEGER NOT NULL REFERENCES sh_message(id) ON DELETE CASCADE,
+		idx         INTEGER NOT NULL,
+		url         TEXT NOT NULL,
+		title       TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT '',
+		date        INTEGER NOT NULL DEFAULT 0,
+		image_idx   INTEGER NOT NULL DEFAULT -1, -- sh_attachment.idx of its image, or -1
+		PRIMARY KEY (message_id, idx)
 	);`,
 }
 

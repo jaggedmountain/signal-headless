@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // signal-headless: a headless Signal client.
 //
 //	signal-headless --link [--name NAME]     link this host as a Signal device (QR)
@@ -13,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,8 +24,12 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
+	"signal-headless/internal/daemon"
 	"signal-headless/internal/paths"
+	"signal-headless/internal/rpc"
+	"signal-headless/internal/signalbackend"
 )
 
 var version = "dev"
@@ -47,6 +55,10 @@ type options struct {
 	dryRun       bool
 	fake         bool
 	foreground   bool
+	check        bool
+	stop         bool
+	deletedTTL   time.Duration
+	json         bool
 }
 
 func parseFlags(args []string) (*options, error) {
@@ -59,6 +71,9 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.daemon, "daemon", false, "run the linked-device daemon")
 	fs.BoolVar(&o.shell, "shell", false, "interactive terminal UI")
 	fs.BoolVar(&o.status, "status", false, "print daemon/account status")
+	fs.BoolVar(&o.check, "check", false, "report whether this host is linked (exit status 3 if not)")
+	fs.BoolVar(&o.stop, "stop", false, "stop the running daemon (clients start it again when needed)")
+	fs.BoolVar(&o.json, "json", false, "--link, --check, --version: machine-readable output (JSON lines)")
 	fs.BoolVar(&o.showVersion, "version", false, "print version")
 	fs.StringVar(&o.sendTo, "send", "", "send a message to `RECIPIENT` (+E164, UUID, group ID, contact name, or 'self')")
 	fs.StringVar(&o.message, "m", "", "message text for --send (default: read stdin)")
@@ -72,8 +87,9 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.verbose, "v", false, "verbose logging")
 	fs.BoolVar(&o.fake, "fake", false, "daemon: use an in-memory fake Signal backend (development)")
 	fs.BoolVar(&o.foreground, "foreground", true, "daemon: log to stderr (false: log to data dir)")
+	fs.DurationVar(&o.deletedTTL, "deleted-ttl", daemon.DefaultDeletedTTL, "daemon: how long \"This message was deleted.\" placeholders stay")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: signal-headless [--link | --unlink [--force] | --import-signal-cli | --daemon | --shell | --send TO | --status]\n\n")
+		fmt.Fprintf(fs.Output(), "usage: signal-headless [--link | --unlink [--force] | --import-signal-cli | --daemon | --shell | --send TO | --status | --check]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -83,13 +99,13 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	modes := 0
-	for _, b := range []bool{o.link, o.unlink, o.importCLI, o.daemon, o.shell, o.status, o.showVersion, o.sendTo != ""} {
+	for _, b := range []bool{o.link, o.unlink, o.importCLI, o.daemon, o.shell, o.status, o.check, o.stop, o.showVersion, o.sendTo != ""} {
 		if b {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return nil, errors.New("choose one of --link, --unlink, --import-signal-cli, --daemon, --shell, --send, --status, --version")
+		return nil, errors.New("choose one of --link, --unlink, --import-signal-cli, --daemon, --shell, --send, --status, --check, --stop, --version")
 	}
 	if modes == 0 {
 		o.shell = true
@@ -141,7 +157,11 @@ func main() {
 	p := resolvePaths(o)
 	switch {
 	case o.showVersion:
-		fmt.Println("signal-headless", version)
+		if o.json {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"version": version, "protocol": rpc.ProtocolVersion})
+		} else {
+			fmt.Println("signal-headless", version)
+		}
 	case o.link:
 		err = runLink(ctx, o, p)
 	case o.unlink:
@@ -152,6 +172,10 @@ func main() {
 		err = runDaemon(ctx, o, p)
 	case o.status:
 		err = runStatus(ctx, o, p)
+	case o.check:
+		err = runCheck(ctx, o, p)
+	case o.stop:
+		err = runStop(ctx, o, p)
 	case o.sendTo != "":
 		err = runSend(ctx, o, p)
 	case o.shell:
@@ -159,6 +183,13 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "signal-headless:", err)
+		if errors.Is(err, signalbackend.ErrNoDevice) {
+			os.Exit(exitNotLinked)
+		}
 		os.Exit(1)
 	}
 }
+
+// exitNotLinked is the exit status of --daemon and --check when no device is
+// linked, so launchers (the VS Code extension) can offer linking.
+const exitNotLinked = 3

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package daemon
 
 import (
@@ -36,15 +39,16 @@ func (s *stringOrList) UnmarshalJSON(b []byte) error {
 // compatParams is the union of native and signal-cli parameters.
 type compatParams struct {
 	// native
-	Thread      model.ThreadID    `json:"thread"`
-	To          string            `json:"to"`
-	Body        string            `json:"body"`
-	Attachments stringOrList      `json:"attachments"`
-	Quote       *model.Quote      `json:"quote"`
-	Target      *model.MessageRef `json:"target"`
-	TargetTS    int64             `json:"targetTs"`
-	Emoji       string            `json:"emoji"`
-	Remove      bool              `json:"remove"`
+	Thread      model.ThreadID          `json:"thread"`
+	To          string                  `json:"to"`
+	Body        string                  `json:"body"`
+	Attachments stringOrList            `json:"attachments"`
+	Quote       *model.Quote            `json:"quote"`
+	Previews    []model.OutgoingPreview `json:"previews"`
+	Target      *model.MessageRef       `json:"target"`
+	TargetTS    int64                   `json:"targetTs"`
+	Emoji       string                  `json:"emoji"`
+	Remove      bool                    `json:"remove"`
 
 	// signal-cli
 	Recipient       stringOrList `json:"recipient"`
@@ -133,7 +137,7 @@ func (d *Daemon) rpcSend(ctx context.Context, params json.RawMessage) (any, erro
 		Results []map[string]any `json:"results"`
 	}
 	for _, t := range threads {
-		m, err := d.Send(ctx, model.Outgoing{Thread: t, Body: body, Attachments: append([]string{}, atts...), Quote: quote})
+		m, err := d.Send(ctx, model.Outgoing{Thread: t, Body: body, Attachments: append([]string{}, atts...), Quote: quote, Previews: p.Previews})
 		if m != nil && res.Message == nil {
 			res.Message = m
 			res.Timestamp = m.TS
@@ -282,9 +286,9 @@ func (d *Daemon) compatEnvelope(ctx context.Context, m *model.Message) map[strin
 		"expiresInSeconds": m.ExpiresIn,
 		"viewOnce":         false,
 	}
-	if len(m.Attachments) > 0 {
+	if files := m.Files(); len(files) > 0 {
 		var atts []map[string]any
-		for _, a := range m.Attachments {
+		for _, a := range files {
 			id := ""
 			if a.State == model.AttachmentDone && a.Path != "" {
 				id = filepath.Base(a.Path)

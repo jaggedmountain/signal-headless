@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package history
 
 import (
@@ -165,5 +168,115 @@ func TestDisappearing(t *testing.T) {
 	}
 	if exp, _ := s.Expired(ctx, time.Now().Add(-time.Minute).UnixMilli()); len(exp) != 0 {
 		t.Fatalf("nothing expires in the past: %+v", exp)
+	}
+}
+
+func TestPurgeDeleted(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	th := model.ThreadID("erin")
+	s.EnsureThread(ctx, th, model.Direct, "")
+	s.InsertMessage(ctx, &model.Message{Thread: th, Author: "erin", TS: 10, Body: "gone soon"})
+	s.InsertMessage(ctx, &model.Message{Thread: th, Author: "erin", TS: 20, Body: "kept", Quote: &model.Quote{Author: "erin", TS: 10, Text: "gone soon"}})
+	before := time.Now().UnixMilli()
+	if _, err := s.ApplyDelete(ctx, th, "erin", 10); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := s.ScrubQuotes(ctx, th, "erin", 10); err != nil || len(ids) != 1 {
+		t.Fatalf("scrub = %v %v", ids, err)
+	}
+	if r, err := s.PurgeDeleted(ctx, before-1); err != nil || len(r) != 0 {
+		t.Fatalf("too early to purge: %+v %v", r, err)
+	}
+	r, err := s.PurgeDeleted(ctx, time.Now().UnixMilli())
+	if err != nil || len(r) != 1 || r[0].Thread != th {
+		t.Fatalf("purge = %+v %v", r, err)
+	}
+	msgs, _ := s.Messages(ctx, th, 0, 10)
+	if len(msgs) != 1 || msgs[0].Body != "kept" {
+		t.Fatalf("left = %+v", msgs)
+	}
+	if q := msgs[0].Quote; q == nil || q.Text != "" || q.TS != 10 {
+		t.Fatalf("quote of a deleted message keeps its text: %+v", q)
+	}
+	if ts, _ := s.Threads(ctx); len(ts) != 1 || ts[0].LastPreview != "kept" {
+		t.Fatalf("thread preview = %+v", ts)
+	}
+	// A reply arriving after the deletion doesn't bring the text back.
+	s.InsertMessage(ctx, &model.Message{Thread: th, Author: "erin", TS: 30, Body: "late", Quote: &model.Quote{Author: "erin", TS: 20, Text: "kept"}})
+	s.ApplyDelete(ctx, th, "erin", 20)
+	s.InsertMessage(ctx, &model.Message{Thread: th, Author: "frank", TS: 40, Body: "later", Quote: &model.Quote{Author: "erin", TS: 20, Text: "kept"}})
+	msgs, _ = s.Messages(ctx, th, 0, 10)
+	if q := msgs[len(msgs)-1].Quote; q == nil || q.Text != "" {
+		t.Fatalf("late reply revived deleted text: %+v", q)
+	}
+}
+
+func TestLinkPreviewStorage(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	th := model.ThreadID("gina")
+	s.EnsureThread(ctx, th, model.Direct, "")
+	m := &model.Message{Thread: th, Author: "gina", TS: 5, Body: "https://example.com/",
+		Attachments: []model.Attachment{{Filename: "doc.pdf"}, {Filename: "preview", Kind: model.AttachmentPreview, Pointer: []byte("p")}},
+		Previews:    []model.LinkPreview{{URL: "https://example.com/", Title: "Example", Description: "An example", Date: 7, Image: 1}}}
+	if _, err := s.InsertMessage(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Previews) != 1 || got.Previews[0] != m.Previews[0] {
+		t.Fatalf("previews = %+v", got.Previews)
+	}
+	if len(got.Attachments) != 2 || got.Attachments[1].Kind != model.AttachmentPreview || got.Attachments[0].Kind != "" {
+		t.Fatalf("attachments = %+v", got.Attachments)
+	}
+	if _, err := s.ApplyDelete(ctx, th, "gina", 5); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Message(ctx, m.ID); len(got.Previews) != 0 {
+		t.Fatalf("deleted message keeps its preview: %+v", got.Previews)
+	}
+}
+
+func TestStatsAndPurge(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	for _, th := range []model.ThreadID{"hal", "ida"} {
+		s.EnsureThread(ctx, th, model.Direct, "")
+	}
+	s.InsertMessage(ctx, &model.Message{Thread: "hal", Author: "hal", TS: 100, Body: "old",
+		Attachments: []model.Attachment{{Filename: "a", Path: "/att/a", State: model.AttachmentDone}, {Filename: "b", State: model.AttachmentFailed, Pointer: []byte("p")}}})
+	s.InsertMessage(ctx, &model.Message{Thread: "hal", Author: "hal", TS: 300, Body: "new"})
+	s.InsertMessage(ctx, &model.Message{Thread: "ida", Author: "ida", TS: 150, Body: "old too"})
+	st, err := s.Stats(ctx)
+	if err != nil || st.Threads != 2 || st.Messages != 3 || st.Attachments != 2 || st.AttachmentsFailed != 1 || st.OldestTS != 100 || st.NewestTS != 300 {
+		t.Fatalf("stats = %+v %v", st, err)
+	}
+	dry, err := s.Purge(ctx, 200, "", true)
+	if err != nil || dry.Messages != 2 || dry.Attachments != 2 || len(dry.Paths) != 1 || len(dry.Threads) != 2 {
+		t.Fatalf("dry run = %+v %v", dry, err)
+	}
+	if st, _ := s.Stats(ctx); st.Messages != 3 {
+		t.Fatal("dry run deleted something")
+	}
+	if r, _ := s.Purge(ctx, 200, "ida", false); r.Messages != 1 || len(r.Threads) != 1 {
+		t.Fatalf("scoped purge = %+v", r)
+	}
+	if n, err := s.RetryFailedAttachments(ctx); err != nil || n != 1 {
+		t.Fatalf("retry failed = %d %v", n, err)
+	}
+	r, err := s.Purge(ctx, 200, "", false)
+	if err != nil || r.Messages != 1 || r.Attachments != 2 {
+		t.Fatalf("purge = %+v %v", r, err)
+	}
+	st, _ = s.Stats(ctx)
+	if st.Messages != 1 || st.Attachments != 0 || st.Threads != 2 {
+		t.Fatalf("after purge = %+v", st)
+	}
+	if err := s.Vacuum(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

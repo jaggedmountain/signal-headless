@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Jeff Mattson
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package main
 
 import (
@@ -16,7 +19,10 @@ func runShell(ctx context.Context, o *options, p paths.Paths) error {
 		return err
 	}
 	defer c.Close()
-	m := tui.New(c, tui.Options{Bell: os.Getenv("SIGNAL_HEADLESS_BELL") != "0"})
+	m := tui.New(c, tui.Options{
+		Bell:         os.Getenv("SIGNAL_HEADLESS_BELL") != "0",
+		LinkPreviews: os.Getenv("SIGNAL_HEADLESS_LINK_PREVIEWS"), // account (default) | on | off
+	})
 	_, err = tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	if err == tea.ErrProgramKilled && ctx.Err() != nil {
 		return nil

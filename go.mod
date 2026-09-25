@@ -8,11 +8,13 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/google/uuid v1.6.0
+	github.com/kyokomi/emoji/v2 v2.2.14
 	github.com/mattn/go-isatty v0.0.20
 	github.com/rs/zerolog v1.35.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.mau.fi/mautrix-signal v0.2609.0
 	go.mau.fi/util v0.10.1
+	golang.org/x/net v0.59.0
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -26,7 +28,6 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
-	github.com/kyokomi/emoji/v2 v2.2.14 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
@@ -41,7 +42,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
-	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect

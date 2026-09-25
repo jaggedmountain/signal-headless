@@ -19,7 +19,7 @@ export CGO_LDFLAGS := -L$(abspath $(dir $(LIBSIGNAL_LIB)))
 
 GO_SRC := $(shell find . -name '*.go' -not -path './third_party/*') go.mod go.sum
 
-.PHONY: all build libsignal test vet install clean
+.PHONY: all build libsignal test vet install clean release-local
 
 all: build
 
@@ -49,3 +49,9 @@ install: $(BIN)
 
 clean:
 	rm -rf bin
+
+# release-local: the release assets without CI (portable build in Docker).
+release-local:
+	build/dist.sh
+	build/package.sh dist/linux-x64/signal-headless linux-x64 dist/release
+
