@@ -155,3 +155,18 @@ func TestCompleteRecipient(t *testing.T) {
 		t.Fatalf("completeRecipient = %v", got)
 	}
 }
+
+func TestEmojize(t *testing.T) {
+	for in, want := range map[string]string{
+		"haha :joy:":              "haha 😂",
+		":JOY::+1:":               "😂👍",
+		"meet at 12:30:45":        "meet at 12:30:45",
+		":not_an_emoji: stays":    ":not_an_emoji: stays",
+		"a:b:c":                   "a:b:c",
+		"party :tada: :thumbsup:": "party 🎉 👍",
+	} {
+		if got := emojize(in); got != want {
+			t.Errorf("emojize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -119,6 +119,7 @@ switching conversations mid-sentence is free.
 | `j` `k`, `g` `G`, `ctrl+u` `ctrl+d` | select messages, oldest/newest, page |
 | `enter`, `i` | write in this thread; `enter` sends, `alt+enter`/`ctrl+j` newline |
 | `ctrl+e` | edit the draft in `$EDITOR` |
+| `:joy:` … | shortcodes in sent messages and reactions become emoji (😂); unknown codes and `12:30:45` stay as typed |
 | `a`, `ctrl+t` | attach a file (tab completes paths); `A` clears |
 | `r` | reply to the selected message (quote) |
 | `e`, `+` | react — `1`–`6` for 👍 ❤️ 😂 😮 😢 🙏, or type any emoji; empty removes |

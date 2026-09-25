@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/bubbles/v2/key"
 
 	"signal-headless/internal/model"
 	"signal-headless/internal/rpc"
@@ -723,7 +723,7 @@ func (m *Model) handleComposeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) sendDraft() tea.Cmd {
-	body := strings.TrimSpace(m.compose.Value())
+	body := emojize(strings.TrimSpace(m.compose.Value()))
 	atts := m.attach[m.cur]
 	if body == "" && len(atts) == 0 {
 		return nil
@@ -895,7 +895,7 @@ func (m *Model) submitPrompt(kind promptKind, val string) tea.Cmd {
 	case promptAttach:
 		return m.addAttachment(val)
 	case promptReact:
-		return m.react(val)
+		return m.react(emojize(val))
 	case promptSearch:
 		if val == "" {
 			val = m.search.query
@@ -1023,7 +1023,7 @@ func (m *Model) runCommand(line string) tea.Cmd {
 	case "search", "s":
 		return m.searchCmd(m.cur, arg)
 	case "react":
-		return m.react(arg)
+		return m.react(emojize(arg))
 	case "retry":
 		if sel := m.selected(); sel != nil {
 			return m.retryCmd(sel.ID)
