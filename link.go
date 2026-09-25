@@ -20,7 +20,28 @@ func openDB(ctx context.Context, o *options, p paths.Paths) (*db.DB, error) {
 	return db.Open(ctx, p.DB(), newLogger(nil, o.verbose).Level(quietLevel(o)))
 }
 
+// printLinkQR shows the provisioning URL as a terminal QR code plus instructions.
+func printLinkQR(url string) error {
+	qr, err := qrcode.New(url, qrcode.Medium)
+	if err != nil {
+		return err
+	}
+	fmt.Println(qr.ToSmallString(false))
+	fmt.Println(url)
+	fmt.Println("\nOn the phone: Signal → Settings → Linked devices → Link new device, then scan.")
+	return nil
+}
+
 func runLink(ctx context.Context, o *options, p paths.Paths) error {
+	if o.fake {
+		// Preview only: a dummy URL of the real shape, no network, nothing stored.
+		// Scanning it on a phone fails harmlessly (no provisioning session exists).
+		if err := printLinkQR("sgnl://linkdevice?uuid=FAKE-preview-not-a-real-session&pub_key=BQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); err != nil {
+			return err
+		}
+		fmt.Println("(--fake: preview of the linking screen; this QR code links nothing)")
+		return nil
+	}
 	d, err := openDB(ctx, o, p)
 	if err != nil {
 		return err
@@ -34,13 +55,9 @@ func runLink(ctx context.Context, o *options, p paths.Paths) error {
 	for resp := range signalmeow.PerformProvisioning(ctx, d.Signal, o.name, false) {
 		switch resp.State {
 		case signalmeow.StateProvisioningURLReceived:
-			qr, err := qrcode.New(resp.ProvisioningURL, qrcode.Medium)
-			if err != nil {
+			if err := printLinkQR(resp.ProvisioningURL); err != nil {
 				return err
 			}
-			fmt.Println(qr.ToSmallString(false))
-			fmt.Println(resp.ProvisioningURL)
-			fmt.Println("\nOn the phone: Signal → Settings → Linked devices → Link new device, then scan.")
 			fmt.Println("Waiting (2 minutes)…")
 		case signalmeow.StateProvisioningDataReceived:
 			dd := resp.ProvisioningData

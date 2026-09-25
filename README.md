@@ -178,6 +178,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"listThreads"}' | signal-headless jsonRpc
 `signal-headless --daemon --fake` (or `--shell --fake`) runs against an
 in-memory backend with seeded conversations and an echo contact, in a scratch
 directory under `/tmp` — nothing reaches Signal. Tests use the same fake.
+`signal-headless --link --fake` previews the linking screen with a dummy QR code.
 
 ```
 main.go, *cmd.go        flags and commands
