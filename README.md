@@ -99,7 +99,7 @@ would split the daemon and its clients across two stores. Override with
 `--data DIR` / `SIGNAL_HEADLESS_DATA`. The socket is
 `$XDG_RUNTIME_DIR/signal-headless.sock` (`--socket` / `SIGNAL_HEADLESS_SOCKET`).
 
-The daemon honours the account's read-receipt and typing-indicator settings
+The daemon honors the account's read-receipt and typing-indicator settings
 (synced from Signal's storage service), follows each conversation's
 disappearing-messages timer — outgoing messages carry it, and expired messages
 and their files are deleted locally — and downloads attachments in the

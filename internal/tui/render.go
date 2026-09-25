@@ -185,6 +185,9 @@ func (m *Model) renderMain(h int) string {
 		}
 		all = append(all, b.lines...)
 	}
+	if n := len(all); n > 0 && all[n-1] == "" {
+		all = all[:n-1] // the bottom area already starts with a blank line
+	}
 	end := len(all)
 	if m.sel >= 0 {
 		// Center-ish: show the selected message with context below it.
@@ -256,13 +259,6 @@ func dayLabel(t time.Time) string {
 }
 
 func (m *Model) buildBlocks(msgs []*model.Message, w, sel int) []block {
-	t := m.thread(m.cur)
-	isGroup := t != nil && t.Kind == model.Group
-	nameW := 4
-	for _, x := range msgs {
-		nameW = max(nameW, min(16, ansi.StringWidth(m.authorLabel(x))))
-	}
-	nameW = min(nameW, max(4, w/5)) // leave room for text in narrow panes
 	var out []block
 	var lastDay string
 	for i, x := range msgs {
@@ -270,9 +266,9 @@ func (m *Model) buildBlocks(msgs []*model.Message, w, sel int) []block {
 		if d := dayLabel(ts); d != lastDay {
 			lastDay = d
 			label := "── " + d + " "
-			out = append(out, block{msgIx: -1, lines: []string{stSep.Render(label + strings.Repeat("─", max(0, w-ansi.StringWidth(label))))}})
+			out = append(out, block{msgIx: -1, lines: []string{stSep.Render(label + strings.Repeat("─", max(0, w-ansi.StringWidth(label)))), ""}})
 		}
-		out = append(out, block{msgIx: i, lines: m.renderMessage(x, w, nameW, i == sel && m.sel >= 0, isGroup)})
+		out = append(out, block{msgIx: i, lines: m.renderMessage(x, w, i == sel && m.sel >= 0)})
 	}
 	return out
 }
@@ -323,32 +319,16 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
 }
 
-// renderMessage lays out one message: "HH:MM name  text", wrapped under the
-// text column, with quote, attachment and reaction lines.
-func (m *Model) renderMessage(x *model.Message, w, nameW int, selected, isGroup bool) []string {
-	clock := time.UnixMilli(x.TS).Format("15:04")
-	name := m.authorLabel(x)
-	ns := nameStyle(x.Author)
-	if name == "me" {
-		ns = lipgloss.NewStyle().Bold(true).Foreground(colDim)
-	}
-	prefixW := 2 + 5 + 1 + nameW + 2 // mark, clock, space, name, gap
-	textW := max(8, w-prefixW)
-	indent := strings.Repeat(" ", prefixW)
-
+// renderMessage lays out one message as a small block: a "HH:MM name" line,
+// then quote, text, attachments and reactions, followed by a blank line.
+// Incoming messages hang from the left; outgoing ones are right-aligned as a
+// block (text stays left-aligned within it).
+func (m *Model) renderMessage(x *model.Message, w int, selected bool) []string {
+	const indent = 4
+	textW := max(8, min(w-indent-2, max(30, w*3/4)))
 	var body []string
 	if q := x.Quote; q != nil {
-		qn := "me"
-		if q.Author != m.status.Account.ACI {
-			qn = shortID(q.Author)
-			for _, y := range m.curMsgs() {
-				if y.Author == q.Author && y.AuthorName != "" {
-					qn = y.AuthorName
-					break
-				}
-			}
-		}
-		body = append(body, stQuote.Render(truncate("↱ "+qn+": "+q.Text, textW)))
+		body = append(body, stQuote.Render(truncate("↱ "+m.nameFor(q.Author)+": "+q.Text, textW)))
 	}
 	text := x.Body
 	switch {
@@ -359,8 +339,7 @@ func (m *Model) renderMessage(x *model.Message, w, nameW int, selected, isGroup 
 	}
 	if text != "" {
 		for _, para := range strings.Split(text, "\n") {
-			wrapped := ansi.Wrap(para, textW, " -")
-			body = append(body, strings.Split(wrapped, "\n")...)
+			body = append(body, strings.Split(ansi.Wrap(para, textW, " -"), "\n")...)
 		}
 	}
 	for _, a := range x.Attachments {
@@ -409,38 +388,53 @@ func (m *Model) renderMessage(x *model.Message, w, nameW int, selected, isGroup 
 	if len(x.Reactions) > 0 {
 		var parts []string
 		for _, r := range x.Reactions {
-			who := "me"
-			if r.Reactor != m.status.Account.ACI {
-				who = shortID(r.Reactor)
-				for _, y := range m.curMsgs() {
-					if y.Author == r.Reactor && y.AuthorName != "" {
-						who = y.AuthorName
-						break
-					}
-				}
-			}
-			parts = append(parts, r.Emoji+" "+who)
+			parts = append(parts, r.Emoji+" "+m.nameFor(r.Reactor))
 		}
 		body = append(body, stReaction.Render(truncate(strings.Join(parts, "  "), textW)))
 	}
 
+	clock := stDim.Render(time.UnixMilli(x.TS).Format("15:04"))
+	name := m.authorLabel(x)
 	mark := "  "
 	if selected {
 		mark = stSelMark.Render("▌ ")
 	}
-	lines := make([]string, len(body))
-	for i, b := range body {
-		if i == 0 {
-			lines[i] = mark + stDim.Render(clock) + " " + ns.Render(padRight(truncate(name, nameW), nameW)) + "  " + b
-		} else {
-			if selected {
-				lines[i] = stSelMark.Render("▌ ") + indent[2:] + b
-			} else {
-				lines[i] = indent + b
-			}
+	var lines []string
+	if !x.Outgoing {
+		header := clock + "  " + nameStyle(x.Author).Render(truncate(name, textW))
+		lines = append(lines, mark+header)
+		pad := strings.Repeat(" ", indent)
+		for _, b := range body {
+			lines = append(lines, mark+pad+b)
+		}
+	} else {
+		header := stBold.Foreground(colDim).Render(name) + "  " + clock
+		blockW := ansi.StringWidth(header)
+		for _, b := range body {
+			blockW = max(blockW, ansi.StringWidth(b))
+		}
+		// Right edge sits one column in from the pane edge.
+		left := max(0, w-2-1-blockW)
+		pad := strings.Repeat(" ", left)
+		lines = append(lines, mark+pad+strings.Repeat(" ", blockW-ansi.StringWidth(header))+header)
+		for _, b := range body {
+			lines = append(lines, mark+pad+b)
 		}
 	}
-	return lines
+	return append(lines, "")
+}
+
+// nameFor returns a short display name for an author ID in this thread.
+func (m *Model) nameFor(id string) string {
+	if id == m.status.Account.ACI {
+		return "me"
+	}
+	for _, y := range m.curMsgs() {
+		if y.Author == id && y.AuthorName != "" {
+			return y.AuthorName
+		}
+	}
+	return shortID(id)
 }
 
 // --- bottom: compose / prompt / status ---
@@ -479,7 +473,7 @@ func (m *Model) renderBottom() string {
 		}
 	}
 	parts = append(parts, m.renderStatus(w))
-	return strings.Join(parts, "\n")
+	return "\n" + strings.Join(parts, "\n")
 }
 
 func (m *Model) completionLabels() []string {
