@@ -90,7 +90,7 @@ try {
   if ($LASTEXITCODE -ne 0) { Fail "couldn't unpack $asset" }
   $new = Join-Path (Join-Path $tmp 'signal-headless') 'signal-headless.exe'
   if (-not (Test-Path $new)) { Fail "$asset has no signal-headless.exe" }
-  $v = Native $new --version
+  try { $v = Native $new --version } catch { $v = $_.Exception.Message; $global:LASTEXITCODE = 1 }
   if ($LASTEXITCODE -ne 0) { Fail "the binary doesn't run here ($v)" }
 
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
