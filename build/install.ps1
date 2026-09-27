@@ -30,6 +30,14 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest is very slow with i
 
 function Say([string]$m) { Write-Host $m }
 function Fail([string]$m) { Write-Host "install.ps1: $m" -ForegroundColor Red; throw "install.ps1: $m" }
+# Runs a native command, stderr discarded. Windows PowerShell 5.1 turns a
+# native command's stderr into a terminating error under 'Stop', even
+# redirected; the preference here is local to the function. Exit status in
+# $LASTEXITCODE.
+function Native([string]$exe) {
+  $ErrorActionPreference = 'Continue'
+  & $exe @args 2>$null
+}
 
 if (-not $Version) { $Version = 'latest' }
 if (-not $BaseUrl) { $BaseUrl = 'https://github.com/jaggedmountain/signal-headless/releases' }
@@ -78,12 +86,12 @@ try {
   $got = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $asset)).Hash
   if ($got -ne $want.ToUpperInvariant()) { Fail "checksum mismatch for $asset - not installing" }
 
-  & tar -xzf (Join-Path $tmp $asset) -C $tmp
+  Native tar -xzf (Join-Path $tmp $asset) -C $tmp
   if ($LASTEXITCODE -ne 0) { Fail "couldn't unpack $asset" }
   $new = Join-Path (Join-Path $tmp 'signal-headless') 'signal-headless.exe'
   if (-not (Test-Path $new)) { Fail "$asset has no signal-headless.exe" }
-  $v = & $new --version 2>&1
-  if ($LASTEXITCODE -ne 0) { Fail "the binary doesn't run here: $v" }
+  $v = Native $new --version
+  if ($LASTEXITCODE -ne 0) { Fail "the binary doesn't run here ($v)" }
 
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   $exe = Join-Path $InstallDir 'signal-headless.exe'
@@ -98,7 +106,7 @@ try {
   foreach ($doc in 'LICENSE', 'README.md') {
     Copy-Item (Join-Path (Join-Path $tmp 'signal-headless') $doc) $InstallDir -Force
   }
-  Say "Installed $(& $exe --version) to $exe"
+  Say "Installed $(Native $exe --version) to $exe"
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
@@ -124,18 +132,22 @@ if (-not $onPath) {
 }
 
 $exe = Join-Path $InstallDir 'signal-headless.exe'
-$newVersion = ((& $exe --version) -split ' ')[1]
-$status = & $exe --status 2>$null
+$newVersion = ((Native $exe --version) -split ' ')[1]
+$status = Native $exe --status
 if ($LASTEXITCODE -eq 0) {
   $running = ($status | Where-Object { $_ -match '^daemon:\s+(\S+)' } | ForEach-Object { $Matches[1] }) | Select-Object -First 1
   if ($running -and $running -ne $newVersion) {
     Say "The running daemon is $running; restart it on $newVersion with: signal-headless --stop   (it starts again when needed)"
   }
 } else {
-  & $exe --check *> $null
+  Native $exe --check | Out-Null
   if ($LASTEXITCODE -eq 0) {
     Say 'Linked. Start with: signal-headless'
   } else {
     Say 'Next: link this computer - signal-headless --link   (scan the QR code: phone > Settings > Linked devices)'
   }
 }
+
+# Success, whatever the probes above returned (not `exit`: under `irm | iex`
+# that would close the PowerShell window).
+$global:LASTEXITCODE = 0
