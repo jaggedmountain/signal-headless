@@ -42,9 +42,17 @@ signal-headless --link               # scan the QR code: phone → Settings → 
 signal-headless                      # the terminal UI; starts the daemon in the background
 ```
 
+On Windows (experimental), in PowerShell:
+
+```powershell
+irm https://github.com/jaggedmountain/signal-headless/releases/latest/download/install.ps1 | iex
+```
+
+It installs to `%LOCALAPPDATA%\Programs\signal-headless` and adds that to
+the user PATH; no administrator rights needed.
+
 The installer downloads the release for this platform (Linux x86-64; Linux
-arm64 and macOS are experimental; on Windows, see
-[docs/portability.md](docs/portability.md)), checks it against the release's `SHA256SUMS`, and puts it in
+arm64 and macOS are experimental), checks it against the release's `SHA256SUMS`, and puts it in
 `~/.local/bin`. `… | sh -s -- --systemd` also sets up the systemd user
 service (Linux); `--version v0.1.0` pins a release. Or build from source (below).
 
@@ -93,7 +101,7 @@ A binary built with `make` needs the build machine's glibc or newer.
 Releases are built by GitHub Actions when a `v*` tag is pushed
 (`.github/workflows/release.yml`), natively per platform:
 `signal-headless-{linux,darwin}-{x64,arm64}.tar.gz`,
-`signal-headless-windows-x64.tar.gz`, `install.sh` and
+`signal-headless-windows-x64.tar.gz`, `install.sh`, `install.ps1` and
 `SHA256SUMS`, with version-less names so `releases/latest/download/…` always
 works. `make release-local` produces the Linux x86-64 assets with Docker.
 `make` also builds on macOS (Xcode command line tools, Rust, Go, `brew
@@ -379,7 +387,7 @@ internal/importer        signal-cli device import
 internal/rpc             JSON-RPC server and client, API types
 internal/tui             the terminal UI (bubbletea v2)
 internal/paths           data directory and socket locations
-build/                   portable build (Docker), release packaging, install.sh
+build/                   portable build (Docker), release packaging, install.sh, install.ps1
 .github/workflows/       CI (tests) and releases (on v* tags)
 ```
 

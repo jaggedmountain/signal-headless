@@ -136,6 +136,25 @@ jobs:
       - name: Smoke test outside MSYS2 (plain PowerShell PATH)
         shell: pwsh
         run: ./build/smoke.ps1 bin/signal-headless.exe
+      - name: Package for install.ps1
+        run: build/package.sh bin/signal-headless.exe windows-x64 dist/mirror/download/v0.0.0
+      - name: install.ps1 in Windows PowerShell 5.1 and PowerShell 7
+        shell: pwsh
+        run: |
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8767', '--directory', 'dist/mirror' -PassThru -WindowStyle Hidden
+          Start-Sleep 2
+          $env:SIGNAL_HEADLESS_BASE_URL = 'http://127.0.0.1:8767'
+          try {
+            foreach ($ps in 'powershell', 'pwsh') {
+              $dir = Join-Path $env:RUNNER_TEMP "install-$ps"
+              & $ps -NoProfile -ExecutionPolicy Bypass -File build/install.ps1 -Version v0.0.0 -InstallDir $dir
+              if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed in $ps" }
+              & (Join-Path $dir 'signal-headless.exe') --version
+              if (-not ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' -contains $dir)) { throw "$dir not added to the user PATH ($ps)" }
+            }
+          } finally {
+            Stop-Process -Id $server.Id -Force
+          }
       - name: Libraries libsignal needs (for the Makefile's link flags)
         if: failure()
         run: |

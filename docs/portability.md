@@ -96,9 +96,13 @@ before.
    browser downloads. A binary downloaded by hand in a browser needs
    `xattr -d com.apple.quarantine` on macOS, or signing and notarization
    (Apple developer account).
-3. **Windows installer:** `install.sh` is Unix-only. On Windows the VS Code
-   extension downloads the daemon; by hand it's the tarball (Windows 10+
-   has `tar`) and `signal-headless.exe` somewhere on `PATH`.
+3. **Windows install:** `install.ps1` (`irm …/install.ps1 | iex`) is the
+   counterpart of `install.sh`: checksum-verified, per user into
+   `%LOCALAPPDATA%\Programs\signal-headless`, added to the user PATH. It
+   replaces a running daemon's `.exe` by renaming it first (Windows allows
+   that, not overwriting). CI runs it in Windows PowerShell 5.1 and
+   PowerShell 7 against the job's own package. The VS Code extension looks
+   there too, and downloads the daemon itself when nothing is installed.
 4. **Windows specifics:** desktop notifications (PowerShell toast APIs, or
    leave them to VS Code); keep AF_UNIX paths under ~100 characters, fine
    for `%LOCALAPPDATA%` with normal user names; no background service yet.

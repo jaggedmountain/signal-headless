@@ -7,7 +7,7 @@
 #   build/package.sh BINARY PLATFORM OUTDIR    e.g. dist/linux-x64/signal-headless linux-x64 dist/release
 #
 # → OUTDIR/signal-headless-PLATFORM.tar.gz  (signal-headless/{signal-headless,LICENSE,README.md,signal-headless.service})
-#   OUTDIR/install.sh
+#   OUTDIR/install.sh, OUTDIR/install.ps1
 #   OUTDIR/SHA256SUMS                       (every asset in OUTDIR)
 set -eu
 BIN=$1 PLATFORM=$2 OUT=$3
@@ -26,6 +26,7 @@ install -m644 LICENSE README.md signal-headless.service "$stage/signal-headless/
 mtime=$(git log -1 --format=%ct 2>/dev/null || date +%s)
 "$TAR" -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" -cf - signal-headless | gzip -9n >"$OUT/signal-headless-$PLATFORM.tar.gz"
 install -m755 build/install.sh "$OUT/install.sh"
+install -m644 build/install.ps1 "$OUT/install.ps1"
 # shellcheck disable=SC2035 # sums passes --
 (cd "$OUT" && rm -f SHA256SUMS && sums * >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS)
 "$BIN" --version

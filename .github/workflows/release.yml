@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Jeff Mattson
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Publishes a GitHub release for a pushed tag (git tag v0.1.0 && git push --tags):
-# signal-headless-<os>-<arch>.tar.gz for each platform below, install.sh and
+# signal-headless-<os>-<arch>.tar.gz for each platform below, install.sh,
+# install.ps1 and
 # SHA256SUMS. Asset names carry no version, so
 # …/releases/latest/download/<asset> always resolves.
 name: release
@@ -142,6 +143,7 @@ jobs:
       - name: Checksums
         run: |
           install -m755 build/install.sh dist/release/install.sh
+          install -m644 build/install.ps1 dist/release/install.ps1
           cd dist/release && sha256sum -- * >SHA256SUMS && cat SHA256SUMS
       - name: Publish
         env:
