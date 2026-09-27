@@ -18,7 +18,7 @@ func TestDefaults(t *testing.T) {
 	if runtime.GOOS == "linux" && p.DataDir != filepath.Join(home(), ".local", "share", "signal-headless") {
 		t.Fatalf("data dir = %s", p.DataDir)
 	}
-	if p.Socket != "/run/user/1234/signal-headless.sock" {
+	if p.Socket != filepath.Join("/run/user/1234", "signal-headless.sock") {
 		t.Fatalf("socket = %s", p.Socket)
 	}
 	t.Setenv("XDG_RUNTIME_DIR", "")
