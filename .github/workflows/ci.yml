@@ -133,6 +133,9 @@ jobs:
             echo 'depends on mingw DLLs (above)' >&2
             exit 1
           fi
+      - name: Smoke test outside MSYS2 (plain PowerShell PATH)
+        shell: pwsh
+        run: ./build/smoke.ps1 bin/signal-headless.exe
       - name: Libraries libsignal needs (for the Makefile's link flags)
         if: failure()
         run: |
