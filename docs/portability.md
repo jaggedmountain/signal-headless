@@ -1,20 +1,24 @@
 # Platforms
 
-Status as of 2026-09-27:
+Status as of 2026-09-27, after the first pre-release (`v0.1.0-rc.1`):
 
 | Platform | Built by | Tested |
 |---|---|---|
-| Linux x86-64 | release workflow (`ubuntu-22.04`), `make release-local` | yes: daily use, CI |
-| Linux arm64 | release workflow (`ubuntu-22.04-arm`), *experimental* | not yet (the first release runs its tests) |
-| macOS arm64 | release workflow (`macos-14`), CI (`macos-14`), *experimental* | not on a real Mac yet |
-| macOS x86-64 | release workflow (`macos-15-intel`), *experimental* | not on a real Mac yet |
-| Windows x86-64 | not built; CI type-checks it (`go vet` with mingw) | no |
+| Linux x86-64 | CI, releases (`ubuntu-22.04`), `make release-local` | daily use; CI tests + smoke test |
+| Linux arm64 | releases (`ubuntu-22.04-arm`), *experimental* | release job: tests + smoke test |
+| macOS arm64 | CI and releases (`macos-14`), *experimental* | CI: tests + smoke test; not on a real Mac yet |
+| macOS x86-64 | releases (`macos-15-intel`), *experimental* | release job: tests + smoke test; not on a real Mac yet |
+| Windows x86-64 | CI and releases (`windows-latest`, MSYS2), *experimental* | CI: tests + smoke test; not on a real PC yet |
+
+"Smoke test" is `build/smoke.sh`: the built binary starts a `--fake` daemon,
+answers `--status` over its unix socket, and stops on `--stop`. The Go tests
+run against the fake backend. Nothing in CI talks to Signal, so linking,
+receiving and sending still need one session on a real machine per platform.
 
 *Experimental* platforms may fail in the release workflow without blocking
 the release; that platform's tarball is then missing, and `install.sh` or
 the VS Code extension say so. Drop `experimental: true` in
-`.github/workflows/release.yml` once a platform has been through a release
-and a real-device check.
+`.github/workflows/release.yml` once a platform has had a real-device check.
 
 ## Why it matters
 
@@ -35,13 +39,33 @@ per platform.
 - **macOS:** signalmeow's cgo flags ask for `-lstdc++`, which Xcode no longer
   ships. The Makefile's Darwin branch puts an empty `libstdc++.a` next to
   `libsignal_ffi.a` and links `libc++` and the Security, CoreFoundation and
-  SystemConfiguration frameworks instead. That framework list is an educated
-  guess at what libsignal's Rust crates need; the first macOS CI run will
-  confirm it or name what's missing. `MACOSX_DEPLOYMENT_TARGET` is 11.0. The
-  workflow checks that the binary links only system libraries (`otool -L`).
+  SystemConfiguration frameworks instead (enough, per CI).
+  `MACOSX_DEPLOYMENT_TARGET` is 11.0. The workflow checks that the binary
+  links only system libraries (`otool -L`).
+- **Windows:** MSYS2 MINGW64 gcc for cgo, and libsignal built for Rust's
+  `x86_64-pc-windows-gnu` target (`rustup set default-host`), so both sides
+  use the mingw ABI; MSVC-built Rust doesn't link with mingw Go. Settings,
+  all in the workflows:
+  - `CC=gcc`, `CXX=g++`: otherwise BoringSSL's CMake looks for MSVC's `cl`.
+  - `LIBCLANG_PATH` to MSYS2's clang, for bindgen in boring-sys.
+  - `CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_gnu=build/windows-boringssl.cmake`,
+    which builds BoringSSL without assembly. A native mingw build otherwise
+    uses BoringSSL's NASM sources, which lack the ADX routines its C headers
+    call under gcc (`fiat_p256_adx_*`), and the final link fails. Setting
+    `-DOPENSSL_NO_ASM` as a C flag instead also reaches `ring`, which then
+    fails to link.
+  - The Makefile links with `-static`, so the mingw runtime
+    (`libstdc++-6.dll`, `libwinpthread-1.dll`) is inside the `.exe`; the
+    workflows check that it imports only Windows DLLs. (rc.1 missed this:
+    MSYS2 has those DLLs on `PATH`, so CI passed.)
+  - `-ldl` in signalmeow's cgo flags comes from the `mingw-w64-dlfcn`
+    package.
 - **Unix socket paths** are limited to 104 bytes on macOS, which the test
   temp directories can exceed; the daemon tests put their socket in a short
-  directory.
+  directory. AF_UNIX works on Windows 10 1803+ (the smoke test uses it).
+- **Timing:** the slower macOS runners exposed a race in the daemon tests (a
+  broadcast sent before the server registered the connection); the test
+  helper now waits for a round trip.
 
 ## Per-OS code
 
@@ -62,36 +86,29 @@ before.
 
 ## What is left
 
-1. **macOS:** run a release, then one session on a real Mac: link, receive,
-   send, attachments, the TUI in Terminal and iTerm2, the extension. Code
-   signing isn't needed for the binary as distributed: `install.sh` (curl)
-   and the extension's download don't set the quarantine flag that makes
-   Gatekeeper block unsigned binaries. Only a binary downloaded by hand in a
-   browser would need `xattr -d com.apple.quarantine` (or signing and
-   notarization, which needs an Apple developer account).
-2. **Windows build:** a `windows-latest` job with MSYS2
-   (`msys2/setup-msys2`) for mingw gcc, and libsignal for the
-   `x86_64-pc-windows-gnu` Rust target so it links with mingw, which cgo
-   needs (MSVC-built Rust and mingw-linked Go don't mix). Unknowns: building
-   BoringSSL for that target, and AF_UNIX sockets under real use. Then the
-   same real-device pass, and a `.zip` or keeping `.tar.gz` (Windows 10+ has
-   `tar`; the extension has its own reader).
-3. **Windows specifics:** desktop notifications (PowerShell toast APIs, or
-   leave them to VS Code); keep AF_UNIX paths under ~100 characters, which is
-   fine for `%LOCALAPPDATA%` with normal user names.
-4. **signal-cli detection** off Linux (e.g. `ps` on macOS), if importing
+1. **A real-device session per platform:** link, receive, send,
+   attachments, the TUI (Terminal and iTerm2 on macOS, Windows Terminal),
+   and the VS Code extension against the local daemon. Then drop
+   `experimental`.
+2. **Signing:** not needed for the binary as distributed: `install.sh`
+   (curl) and the extension's download don't set the quarantine flag that
+   makes Gatekeeper block unsigned binaries, and SmartScreen only checks
+   browser downloads. A binary downloaded by hand in a browser needs
+   `xattr -d com.apple.quarantine` on macOS, or signing and notarization
+   (Apple developer account).
+3. **Windows installer:** `install.sh` is Unix-only. On Windows the VS Code
+   extension downloads the daemon; by hand it's the tarball (Windows 10+
+   has `tar`) and `signal-headless.exe` somewhere on `PATH`.
+4. **Windows specifics:** desktop notifications (PowerShell toast APIs, or
+   leave them to VS Code); keep AF_UNIX paths under ~100 characters, fine
+   for `%LOCALAPPDATA%` with normal user names; no background service yet.
+5. **macOS background service:** a launchd agent, the counterpart of the
+   systemd unit.
+6. **signal-cli detection** off Linux (e.g. `ps` on macOS), if importing
    from signal-cli matters there; otherwise "stop signal-cli first" is
    enough.
-5. **Extension tests on macOS:** `npm run test:vscode` needs no xvfb there;
-   a `macos-14` job in the extension's CI would cover the macOS code paths
-   (paths, notifications via `osascript`).
-
-## Effort guess
-
-- **Linux arm64:** done once a release passes; nothing platform-specific.
-- **macOS:** fixing whatever the first CI run reports (likely the framework
-  list), then half a day on a real Mac.
-- **Windows:** 1–2 days. CI turns the libsignal/BoringSSL question into
-  build logs instead of guesswork, but it may still stall there.
+7. **Extension tests on macOS and Windows:** `npm run test:vscode` needs no
+   xvfb there; jobs in the extension's CI would cover its per-OS code
+   (paths, `osascript` notifications).
 
 Nothing about linked-device behaviour differs between platforms.
