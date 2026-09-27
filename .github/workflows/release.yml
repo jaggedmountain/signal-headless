@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Jeff Mattson
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Publishes a GitHub release for a pushed tag (git tag v0.1.0 && git push --tags):
-# signal-headless-linux-x64.tar.gz, install.sh and SHA256SUMS. Asset names
-# carry no version, so …/releases/latest/download/<asset> always resolves.
+# signal-headless-<os>-<arch>.tar.gz for each platform below, install.sh and
+# SHA256SUMS. Asset names carry no version, so
+# …/releases/latest/download/<asset> always resolves.
 name: release
 
 on:
@@ -13,10 +14,21 @@ permissions:
   contents: write
 
 jobs:
-  linux-x64:
-    # 22.04 (glibc 2.35) keeps the binary runnable on older systems; the
-    # same base as build/dist.sh.
-    runs-on: ubuntu-22.04
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 (glibc 2.35) keeps the Linux binaries runnable on
+          # older systems; the same base as build/dist.sh.
+          # experimental: not yet proven by a release; a failure there leaves
+          # that platform out instead of blocking the release.
+          - { platform: linux-x64, runner: ubuntu-22.04, protoc: linux-x86_64 }
+          - { platform: linux-arm64, runner: ubuntu-22.04-arm, protoc: linux-aarch_64, experimental: true }
+          - { platform: darwin-arm64, runner: macos-14, experimental: true }
+          - { platform: darwin-x64, runner: macos-15-intel, experimental: true }
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,31 +36,69 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Build dependencies
+      - name: Build dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev cmake
-      - name: protoc
-        run: |
-          curl -sSfL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
+          # 22.04's protoc 3.12 predates proto3 optional fields, which libsignal uses.
+          curl -sSfL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-${{ matrix.protoc }}.zip"
           sudo unzip -o -q /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+      - name: Build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf gnu-tar
+      - name: Rust
+        run: |
+          # libsignal's rust-toolchain file picks the toolchain; rustup fetches it.
+          command -v rustup >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
       - name: Cache libsignal
         uses: actions/cache@v4
         with:
           path: |
             third_party/libsignal
             ~/.cargo/registry
-          key: libsignal-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          key: libsignal-${{ matrix.platform }}-${{ hashFiles('Makefile') }}
       - name: Build
         run: make build VERSION="$GITHUB_REF_NAME"
       - run: make test
       - name: Check the glibc floor
+        if: runner.os == 'Linux'
         run: |
           need=$(objdump -T bin/signal-headless | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1)
           echo "requires $need"
           [ "$(printf '%s\nGLIBC_2.35\n' "$need" | sort -V | tail -1)" = GLIBC_2.35 ]
+      - name: Check the macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          # Only system libraries, nothing from Homebrew; and the deployment target.
+          otool -L bin/signal-headless
+          if otool -L bin/signal-headless | tail -n +2 | grep -vE '^[[:space:]]+(/usr/lib/|/System/Library/)'; then
+            echo 'links libraries outside the OS (above)' >&2
+            exit 1
+          fi
+          otool -l bin/signal-headless | grep -A3 LC_BUILD_VERSION
       - name: Package
-        run: build/package.sh bin/signal-headless linux-x64 dist/release
+        run: build/package.sh bin/signal-headless ${{ matrix.platform }} dist/${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}/signal-headless-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          install -m755 build/install.sh dist/release/install.sh
+          cd dist/release && sha256sum -- * >SHA256SUMS && cat SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

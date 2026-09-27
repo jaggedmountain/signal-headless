@@ -17,6 +17,16 @@ export PATH := $(HOME)/.cargo/bin:$(PATH)
 export CGO_ENABLED := 1
 export CGO_LDFLAGS := -L$(abspath $(dir $(LIBSIGNAL_LIB)))
 
+# macOS: signalmeow's cgo flags ask for -lstdc++, which Xcode no longer ships.
+# An empty libstdc++.a next to libsignal_ffi.a satisfies the flag, and libc++
+# plus the system frameworks Rust's TLS and networking crates use do the work.
+# MACOSX_DEPLOYMENT_TARGET is honoured by both cargo and cgo's clang.
+ifeq ($(shell uname -s),Darwin)
+export MACOSX_DEPLOYMENT_TARGET ?= 11.0
+CGO_LDFLAGS += -lc++ -framework Security -framework CoreFoundation -framework SystemConfiguration
+STDCXX_STUB := $(dir $(LIBSIGNAL_LIB))libstdc++.a
+endif
+
 GO_SRC := $(shell find . -name '*.go' -not -path './third_party/*') go.mod go.sum
 
 .PHONY: all build libsignal test vet install clean release-local
@@ -25,7 +35,7 @@ all: build
 
 build: $(BIN)
 
-$(BIN): $(LIBSIGNAL_LIB) $(GO_SRC)
+$(BIN): $(LIBSIGNAL_LIB) $(STDCXX_STUB) $(GO_SRC)
 	go build -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o $@ .
 
 libsignal: $(LIBSIGNAL_LIB)
@@ -38,10 +48,14 @@ $(LIBSIGNAL_LIB):
 	cd $(LIBSIGNAL_DIR) && RUSTFLAGS="-Ctarget-feature=-crt-static" RUSTC_WRAPPER="" \
 		cargo build -p libsignal-ffi --profile=release
 
-test: $(LIBSIGNAL_LIB)
+$(STDCXX_STUB): $(LIBSIGNAL_LIB)
+	printf '' | cc -x c -c -o $(@D)/stdcxx-stub.o -
+	ar rcs $@ $(@D)/stdcxx-stub.o
+
+test: $(LIBSIGNAL_LIB) $(STDCXX_STUB)
 	go test ./...
 
-vet: $(LIBSIGNAL_LIB)
+vet: $(LIBSIGNAL_LIB) $(STDCXX_STUB)
 	go vet ./...
 
 install: $(BIN)

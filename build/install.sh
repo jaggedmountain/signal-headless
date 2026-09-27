@@ -32,12 +32,15 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 case $(uname -s) in
   Linux) os=linux ;;
-  *) die "no release for $(uname -s) yet (Linux only for now; macOS/Windows: see docs/portability.md)" ;;
+  Darwin) os=darwin ;;
+  *) die "no release for $(uname -s) yet (Linux and macOS only for now; Windows: see docs/portability.md)" ;;
 esac
 case $(uname -m) in
   x86_64|amd64) arch=x64 ;;
-  *) die "no release for $(uname -m) yet (x86-64 only for now)" ;;
+  aarch64|arm64) arch=arm64 ;;
+  *) die "no release for $(uname -m) yet (x86-64 and arm64 only)" ;;
 esac
+[ "$SYSTEMD" = 1 ] && [ "$os" != linux ] && die "--systemd is for Linux only"
 asset=signal-headless-$os-$arch.tar.gz
 
 if command -v curl >/dev/null 2>&1; then
@@ -73,7 +76,12 @@ want=$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS"
 
 tar -xzf "$tmp/$asset" -C "$tmp"
 bin=$tmp/signal-headless/signal-headless
-"$bin" --version >/dev/null 2>&1 || die "the binary doesn't run here (it needs glibc 2.34 or newer; this system: $(ldd --version 2>/dev/null | head -1))"
+if ! "$bin" --version >/dev/null 2>&1; then
+  case $os in
+    linux) die "the binary doesn't run here (it needs glibc 2.34 or newer; this system: $(ldd --version 2>/dev/null | head -1))" ;;
+    *) die "the binary doesn't run here (it needs macOS 11 or newer)" ;;
+  esac
+fi
 
 mkdir -p "$PREFIX/bin"
 # Replace atomically: a running daemon keeps its old copy until restarted.

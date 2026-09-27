@@ -42,10 +42,10 @@ signal-headless --link               # scan the QR code: phone → Settings → 
 signal-headless                      # the terminal UI; starts the daemon in the background
 ```
 
-The installer downloads the release for this platform (Linux x86-64 for
-now), checks it against the release's `SHA256SUMS`, and puts it in
+The installer downloads the release for this platform (Linux x86-64; Linux
+arm64 and macOS are experimental), checks it against the release's `SHA256SUMS`, and puts it in
 `~/.local/bin`. `… | sh -s -- --systemd` also sets up the systemd user
-service; `--version v0.1.0` pins a release. Or build from source (below).
+service (Linux); `--version v0.1.0` pins a release. Or build from source (below).
 
 With the [VS Code extension](https://github.com/jaggedmountain/signal-headless-vscode),
 none of this is needed: it finds this install or downloads the matching
@@ -89,11 +89,13 @@ make release-local   # portable build in an Ubuntu 22.04 container (glibc ≥ 2.
 ```
 
 A binary built with `make` needs the build machine's glibc or newer.
-Releases are built by GitHub Actions on Ubuntu 22.04 when a `v*` tag is
-pushed (`.github/workflows/release.yml`): `signal-headless-linux-x64.tar.gz`,
-`install.sh` and `SHA256SUMS`, with version-less names so
-`releases/latest/download/…` always works. `make release-local` produces
-the same assets with Docker. `LIBSIGNAL_REV` in the Makefile must match the
+Releases are built by GitHub Actions when a `v*` tag is pushed
+(`.github/workflows/release.yml`), natively per platform:
+`signal-headless-{linux,darwin}-{x64,arm64}.tar.gz`, `install.sh` and
+`SHA256SUMS`, with version-less names so `releases/latest/download/…` always
+works. `make release-local` produces the Linux x86-64 assets with Docker.
+`make` also builds on macOS (Xcode command line tools, Rust, Go, `brew
+install protobuf`). `LIBSIGNAL_REV` in the Makefile must match the
 libsignal version used by the `go.mau.fi/mautrix-signal` release in
 `go.mod`; bump both together.
 
@@ -349,10 +351,10 @@ terminal.
 
 ## Platforms
 
-Linux x86-64 is what runs today. The code is prepared for macOS and Windows,
-with per-OS data directories, locking and process handling, and the Windows
-build type-checks, but neither has been built or tested; see
-[docs/portability.md](docs/portability.md).
+Linux x86-64 is what runs today. Releases also build Linux arm64 and macOS
+(Apple Silicon and Intel), which are experimental: built and unit-tested in
+CI, not yet run against a real account. Windows type-checks in CI but isn't
+built yet. See [docs/portability.md](docs/portability.md).
 
 ## Development
 

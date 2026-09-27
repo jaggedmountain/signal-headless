@@ -39,3 +39,29 @@ jobs:
       - run: make vet
       - name: gofmt
         run: test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
+      - name: Windows type-check (no Windows build yet; docs/portability.md)
+        run: |
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+          GOOS=windows CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go vet ./...
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: brew install protobuf
+      - name: Rust
+        run: |
+          command -v rustup >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - name: Cache libsignal
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/libsignal
+            ~/.cargo/registry
+          key: libsignal-darwin-arm64-${{ hashFiles('Makefile') }}
+      - run: make build
+      - run: make test

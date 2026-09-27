@@ -42,7 +42,14 @@ func start(t *testing.T, opts ...func(*Config)) *env {
 	fake := fakebackend.New()
 	att := filepath.Join(dir, "attachments")
 	os.MkdirAll(att, 0o700)
-	sock := filepath.Join(dir, "d.sock")
+	// Not in dir: t.TempDir() paths on macOS carry the test name and can
+	// pass the 104-byte limit on unix socket paths.
+	sockDir, err := os.MkdirTemp("", "shd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "d.sock")
 	cfg := Config{Socket: sock, AttachmentsDir: att, Version: "test"}
 	for _, o := range opts {
 		o(&cfg)
