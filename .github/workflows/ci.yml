@@ -89,6 +89,11 @@ jobs:
       # Without these, BoringSSL's CMake looks for MSVC's cl.
       CC: gcc
       CXX: g++
+      # boring-sys turns BoringSSL's assembly off on Windows hosts, but only
+      # as a CMake option; its C headers still call the assembly-only ADX
+      # routines (fiat_p256_adx_*) unless the macro reaches the compiler.
+      CFLAGS_x86_64_pc_windows_gnu: -DOPENSSL_NO_ASM
+      CXXFLAGS_x86_64_pc_windows_gnu: -DOPENSSL_NO_ASM
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
