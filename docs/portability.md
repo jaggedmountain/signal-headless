@@ -1,24 +1,21 @@
 # Platforms
 
-Status as of 2026-09-27, after the first pre-release (`v0.1.0-rc.1`):
+Status as of 2026-09-27:
 
 | Platform | Built by | Tested |
 |---|---|---|
 | Linux x86-64 | CI, releases (`ubuntu-22.04`), `make release-local` | daily use; CI tests + smoke test |
-| Linux arm64 | releases (`ubuntu-22.04-arm`), *experimental* | release job: tests + smoke test |
-| macOS arm64 | CI and releases (`macos-14`), *experimental* | CI: tests + smoke test; not on a real Mac yet |
-| macOS x86-64 | releases (`macos-15-intel`), *experimental* | release job: tests + smoke test; not on a real Mac yet |
-| Windows x86-64 | CI and releases (`windows-latest`, MSYS2), *experimental* | CI: tests + smoke test; not on a real PC yet |
+| Linux arm64 | releases (`ubuntu-22.04-arm`) | release job: tests + smoke test |
+| macOS arm64 | CI and releases (`macos-14`) | a real Mac; CI tests + smoke test + installers |
+| macOS x86-64 | releases (`macos-15-intel`) | release job: tests + smoke test |
+| Windows x86-64 | CI and releases (`windows-latest`, MSYS2) | a real PC; CI tests + smoke tests + installers |
 
 "Smoke test" is `build/smoke.sh`: the built binary starts a `--fake` daemon,
 answers `--status` over its unix socket, and stops on `--stop`. The Go tests
 run against the fake backend. Nothing in CI talks to Signal, so linking,
-receiving and sending still need one session on a real machine per platform.
-
-*Experimental* platforms may fail in the release workflow without blocking
-the release; that platform's tarball is then missing, and `install.sh` or
-the VS Code extension say so. Drop `experimental: true` in
-`.github/workflows/release.yml` once a platform has had a real-device check.
+receiving and sending need a session on a real machine: done for Linux
+x86-64, macOS arm64 and Windows x86-64; Linux arm64 and Intel Macs rely on
+CI so far.
 
 ## Why it matters
 
@@ -86,10 +83,9 @@ before.
 
 ## What is left
 
-1. **A real-device session per platform:** link, receive, send,
-   attachments, the TUI (Terminal and iTerm2 on macOS, Windows Terminal),
-   and the VS Code extension against the local daemon. Then drop
-   `experimental`.
+1. **A real-device session for Linux arm64 and Intel Macs:** link,
+   receive, send, attachments, the TUI, and the VS Code extension against
+   the local daemon.
 2. **Signing:** not needed for the binary as distributed: `install.sh`
    (curl) and the extension's download don't set the quarantine flag that
    makes Gatekeeper block unsigned binaries, and SmartScreen only checks

@@ -5,221 +5,109 @@
   </picture>
 </p>
 
-Signal on a computer without Signal Desktop: one Go binary that links as a
-Signal device and keeps running in the background. A terminal chat client
-and a VS Code extension connect to it. No Java, no Docker, no signal-cli.
+Signal on a computer without Signal Desktop: one small program that links as
+a Signal device and keeps receiving in the background. Chat from the
+terminal or from VS Code. No Java, no Docker, no signal-cli.
 
 - **A real linked device.** It links like Signal Desktop (scan a QR code),
   and can bring over the phone's message history.
-- **Always receiving.** A small daemon holds the connection and stores
-  everything in SQLite, whether or not a client is open.
-- **A keyboard-driven terminal UI** (`--shell`): conversations on the left,
-  per-conversation drafts, replies, reactions, attachments, search, link
-  previews, emoji shortcodes.
-- **A VS Code extension** ([signal-headless-vscode](https://github.com/jaggedmountain/signal-headless-vscode)): notifications that appear once across
-  windows, a conversations view, chat tabs, search results, diagnostics.
-  It also works in Remote-SSH windows.
-- **Scriptable.** `--send`, `--status`, and a JSON-RPC socket that is also a
-  drop-in replacement for `signal-cli jsonRpc`.
+- **Always receiving.** A background service holds the connection and keeps
+  every message, whether or not a client is open.
+- **A keyboard-driven terminal UI:** conversations on the left, drafts per
+  conversation, replies, reactions, attachments, search, link previews,
+  emoji shortcodes.
+- **A VS Code extension** ([signal-headless-vscode](https://github.com/jaggedmountain/signal-headless-vscode)):
+  notifications, a conversations view, chat tabs, search. It also works in
+  Remote-SSH windows.
+- **Scriptable:** `--send`, `--status`, and a socket API that also stands in
+  for `signal-cli jsonRpc`.
 
-The Signal protocol is Signal's own
-[libsignal](https://github.com/signalapp/libsignal) (Rust), statically
-linked through [signalmeow](https://github.com/mautrix/signal/tree/main/pkg/signalmeow),
-the Go library behind the mautrix Signal bridge.
+*Unofficial. Not affiliated with or endorsed by Signal Messenger or the
+Signal Technology Foundation.*
 
-**Contents:** [Quick start](#quick-start) · [How it works](#how-it-works) ·
-[Building](#building) · [Linking](#linking) · [Running the daemon](#running-the-daemon) ·
-[What the daemon does](#what-the-daemon-does) · [The shell](#the-shell) ·
-[VS Code](#vs-code) · [Command line](#command-line) · [Client protocol](#client-protocol) ·
+**Contents:** [Install](#install) · [Linking](#linking) ·
+[The terminal UI](#the-terminal-ui) · [VS Code](#vs-code) ·
+[Command line](#command-line) · [Always on](#always-on) ·
 [Troubleshooting](#troubleshooting) · [Security and privacy](#security-and-privacy) ·
-[Platforms](#platforms) · [Development](#development) · [License](#license)
+[Platforms](#platforms) · [Donate](#donate) · [License](#license)
 
-## Quick start
+## Install
+
+Linux and macOS:
 
 ```bash
 curl -fsSL https://github.com/jaggedmountain/signal-headless/releases/latest/download/install.sh | sh
-signal-headless --link               # scan the QR code: phone → Settings → Linked devices → Link new device
-signal-headless                      # the terminal UI; starts the daemon in the background
+signal-headless --link      # scan the QR code: phone → Settings → Linked devices → Link new device
+signal-headless             # the terminal UI; starts the background service when needed
 ```
 
-On Windows (experimental), in PowerShell:
+Windows, in PowerShell:
 
 ```powershell
 irm https://github.com/jaggedmountain/signal-headless/releases/latest/download/install.ps1 | iex
 ```
 
-It installs to `%LOCALAPPDATA%\Programs\signal-headless` and adds that to
-the user PATH; no administrator rights needed.
+The installer downloads the release for this computer, checks it against the
+release's checksums, and installs it for this user: `~/.local/bin` on Linux
+and macOS, `%LOCALAPPDATA%\Programs\signal-headless` on Windows (added to
+the user PATH). No administrator rights needed. On Linux,
+`… | sh -s -- --systemd` also sets up an always-on service
+([Always on](#always-on)).
 
-The installer downloads the release for this platform (Linux x86-64; Linux
-arm64 and macOS are experimental), checks it against the release's `SHA256SUMS`, and puts it in
-`~/.local/bin`. `… | sh -s -- --systemd` also sets up the systemd user
-service (Linux); `--version v0.1.0` pins a release. Or build from source (below).
+- **Update:** `signal-headless --update`. It installs the latest release
+  with the same options and restarts the service. Messages, keys and the
+  link are kept.
+- **Uninstall:** `signal-headless --uninstall`. It unlinks this computer
+  from the Signal account and deletes its message history and keys, which
+  are stored unencrypted. `--uninstall --retain` keeps them. On Windows it
+  prints the command to run.
 
-To update: `signal-headless --update`, which runs the latest release's
-installer with the options this install used (prefix, `--systemd`, mirror)
-and restarts the daemon on the new version. History, keys and the link are
-kept.
+With the [VS Code extension](https://github.com/jaggedmountain/signal-headless-vscode)
+none of this is needed: it uses this install if there is one, else
+downloads its own, and links with a QR code panel.
 
-To remove it: `signal-headless --uninstall`. That also unlinks this
-computer from the Signal account and deletes its message history and keys,
-which are stored unencrypted; `--uninstall --retain` keeps them. (On
-Windows it prints the command to run, since a running `.exe` can't delete
-itself.)
-
-With the [VS Code extension](https://github.com/jaggedmountain/signal-headless-vscode),
-none of this is needed: it finds this install or downloads the matching
-release itself, and links with a QR code panel.
-
-## How it works
-
-```
-Signal servers ⇄ daemon ── device keys, message history, attachments (SQLite + files)
-                   │ unix socket: JSON-RPC 2.0, one JSON object per line
-     ┌─────────────┼───────────────┬───────────────┬──────────────┐
-  --shell       VS Code         --send          signal_agent    scripts
-  (terminal)    extension       --status        (jsonRpc bridge)
-```
-
-A linked device has one set of keys and one server-side message queue, so
-exactly one process may talk to Signal: the daemon. Everything else is a
-client, and any number can connect at once. Signal's servers keep no
-message history; apart from the phone's one-time transfer at linking, the
-daemon's database is the only record on this computer.
-
-The daemon is started on demand (`--shell`, `--send` and the VS Code
-extension start it in the background when it isn't running), or kept running
-with the systemd unit below. A lock on the data directory ensures one daemon
-per account, whoever starts it.
-
-## Building
-
-Build dependencies (Debian/Ubuntu):
-
-```bash
-sudo apt install clang libclang-dev cmake make build-essential protobuf-compiler libprotobuf-dev
-curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-```
-
-```bash
-make            # first run clones and builds libsignal (~5 min), then bin/signal-headless
-make test
-make install    # → ~/.local/bin/signal-headless
-make release-local   # portable build in an Ubuntu 22.04 container (glibc ≥ 2.34) + release assets → dist/release/
-```
-
-A binary built with `make` needs the build machine's glibc or newer.
-Releases are built by GitHub Actions when a `v*` tag is pushed
-(`.github/workflows/release.yml`), natively per platform:
-`signal-headless-{linux,darwin}-{x64,arm64}.tar.gz`,
-`signal-headless-windows-x64.tar.gz`, `install.sh`, `install.ps1` and
-`SHA256SUMS`, with version-less names so `releases/latest/download/…` always
-works. `make release-local` produces the Linux x86-64 assets with Docker.
-`make` also builds on macOS (Xcode command line tools, Rust, Go, `brew
-install protobuf`). `LIBSIGNAL_REV` in the Makefile must match the
-libsignal version used by the `go.mau.fi/mautrix-signal` release in
-`go.mod`; bump both together.
+To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Linking
 
 ```bash
-signal-headless --link --name "my-laptop"
+signal-headless --link
 ```
 
-Scan the code on the phone (Settings → Linked devices → Link new device).
-The phone then offers **Transfer message history**. If chosen, it uploads an
-encrypted archive, which the daemon downloads and imports on its first start
-(progress shows in `--status` clients, the VS Code status bar and the log).
-Imported messages are stored quietly: no notifications, no signal-cli events.
-Attachments from the last 45 days are fetched in the background while
-Signal still holds them; older ones are listed with a note and can be
-retried. Deleted, expired and view-once content isn't imported.
+Scan the code on the phone (Signal App → Settings → Linked devices → Link new device).
+The phone then offers **Transfer message history**. If chosen, the history
+is imported on first start (progress shows in `--status`, the VS Code
+status bar and the log). Attachments from
+the last 45 days are fetched in the background; older ones are listed with
+a note and can be retried. Deleted, expired and view-once content isn't
+imported.
 
-**Taking over a signal-cli device** (keeps its device slot, no QR code):
+**Unlinking:** `signal-headless --unlink` removes this computer from the
+account (like Unlink on the phone) and deletes its keys. It asks for the
+account number first. Message history is kept, so linking again doesn't
+lose it. If the phone already removed the device, `--unlink --force` just
+deletes the local keys.
+
+**Coming from signal-cli?** The device signal-cli linked can be taken over,
+keeping its slot, with no QR code:
 
 ```bash
 signal-headless --import-signal-cli --dry-run   # validate; writes nothing
-systemctl --user stop signal_agent.service      # nothing may use signal-cli now
+# stop everything that uses signal-cli, then:
 signal-headless --import-signal-cli
 ```
 
 The import only reads signal-cli's files. Afterwards **signal-cli must never
-run for that account again**: two clients on one identity split the message
-queue and break each other's sessions. The daemon refuses to start while a
-signal-cli process exists and stops if one appears. On first start it also
-prunes stale session records signal-cli leaves behind; they would otherwise
-block sending.
+run for that account again**: two programs on one identity break each
+other's sessions. signal-headless refuses to start while signal-cli runs.
 
-**Unlinking:** `signal-headless --unlink` removes the device from the account
-(like Linked devices → Unlink on the phone), deletes its keys and stops the
-daemon. It asks for the account number first. Message history is kept, so
-linking again doesn't lose it. If the phone already removed the device,
-`--unlink --force` just deletes the local keys (with the daemon stopped).
+## The terminal UI
 
-## Running the daemon
-
-For an always-on device:
-
-```bash
-cp signal-headless.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now signal-headless.service
-loginctl enable-linger "$USER"      # keep running without a login session
-journalctl --user -u signal-headless -f
-```
-
-The VS Code extension starts the daemon through this unit when it's
-installed.
-
-| Where | What |
-|---|---|
-| `~/.local/share/signal-headless/signal-headless.db` | keys, sessions, contacts, message history |
-| `~/.local/share/signal-headless/attachments/` | downloaded attachments, link-preview images |
-| `~/.local/share/signal-headless/daemon.log` | log when started in the background |
-| `$XDG_RUNTIME_DIR/signal-headless.sock` | the client socket (mode 0600) |
-
-`XDG_DATA_HOME` is deliberately ignored. Confined terminals, like the VS Code
-snap's, point it at a private directory, which would split the daemon and
-its clients across two stores.
-
-| Option | Environment | |
-|---|---|---|
-| `--data DIR` | `SIGNAL_HEADLESS_DATA` | data directory |
-| `--socket PATH` | `SIGNAL_HEADLESS_SOCKET` | client socket |
-| `--deleted-ttl 1h` | | how long "This message was deleted." placeholders stay |
-| `--foreground=false` | | log to `daemon.log` instead of stderr |
-| `-v` | | debug logging |
-| | `SIGNAL_HEADLESS_BELL=0` | shell: no terminal bell for other conversations |
-| | `SIGNAL_HEADLESS_LINK_PREVIEWS=on\|off` | shell: override the account's link-preview setting |
-
-## What the daemon does
-
-- **Receives and stores** messages, edits, reactions, receipts, typing,
-  stickers, quotes and mentions. Calls, polls, payments and shared contacts
-  appear as short notes ("answer on the phone").
-- **Follows the account's settings** from Signal's storage service: read
-  receipts, typing indicators, link previews.
-- **Disappearing messages:** outgoing messages carry the conversation's
-  timer. Expired messages and their files are deleted locally.
-- **Attachments** download in the background, newest first, so live media
-  never waits behind a history backlog. Three tries each; clients can retry.
-- **Deletions:** "delete for everyone" leaves a placeholder for an hour, then
-  it's removed, and replies quoting it lose the quoted text. "Delete for
-  me" from the phone removes messages or whole conversations here too.
-- **Link previews:** previews the sender's app attached are kept. Pages of
-  incoming links are never fetched. For outgoing messages, clients can ask for a
-  preview, which the daemon fetches like Signal's apps do (sender side):
-  https only, public addresses only (checked when connecting), at most 3
-  redirects, 512 KB of page and a 2 MB image.
-- **Maintenance:** storage statistics, and purging history older than a date,
-  on this computer only or (opt-in) on all the account's devices via
-  Signal's "delete for me" sync.
-
-## The shell
-
-`signal-headless` (or `--shell`), aerc-style: conversations on the left, the
-open one on the right, a compose line at the bottom. Drafts, reply targets and
+`signal-headless` (or `--shell`): conversations on the left, the open one on
+the right, a compose line at the bottom. Drafts, reply targets and
 attachments are kept per conversation, so switching mid-sentence is free.
+
+<p align="center"><img src="docs/tui.png" alt="The terminal UI: the conversation list, and a conversation with a reply, a reaction, an attachment and a link preview" width="820"></p>
 
 | Keys | |
 |---|---|
@@ -242,174 +130,132 @@ attachments are kept per conversation, so switching mid-sentence is free.
 | `?` | help |
 | `q` | quit (confirm with `q` or `enter`; `ctrl+c` quits at once) |
 
-`:joy:`-style shortcodes in messages and reactions become emoji (😂); unknown
-codes and times like `12:30:45` stay as typed. A moment after an https link
-is typed, `🔗 title — site` shows the preview that will be sent. Received
-previews show the same way. Opening a conversation marks it read (sending
-read receipts if enabled). The terminal bell rings for messages in other
-conversations.
+`:joy:`-style shortcodes become emoji (😂). A moment after an https link is
+typed, the preview that will be sent shows above the compose line. Opening a
+conversation marks it read (sending read receipts if the account has them
+on). The terminal bell rings for messages in other conversations
+(`SIGNAL_HEADLESS_BELL=0` turns it off).
 
 ## VS Code
 
 The [VS Code extension](https://github.com/jaggedmountain/signal-headless-vscode)
-(`jaggedmountain.signal-headless`, its own repository) is a full client:
-- notifications that appear once even with several windows open
-  (desktop notifications when VS Code isn't focused)
-- an unread count in the status bar
-- a conversations view (active or all), chat tabs, and a Search Results panel
-- a Diagnostics view with purge
-- link previews in both directions
-- linking from a QR code panel, with the history transfer shown as it runs
-
-The extension runs on the local side of Remote-SSH windows. It uses an
-installed `signal-headless` when it is new enough, else downloads the
-release it was built for (checksum-verified) into its own storage.
+(`JaggedMountain.signal-headless`) is a full client: notifications that
+appear once even with several windows open, an unread count in the status
+bar, a conversations view, chat tabs, search, link previews, and linking
+from a QR code panel. It runs on the local side of Remote-SSH windows.
 
 ## Command line
 
 ```
 signal-headless                        the terminal UI (same as --shell)
-signal-headless --link [--name N]      link this computer (QR code); --json for machine-readable steps
-signal-headless --unlink [--force]     remove this device (history is kept)
-signal-headless --import-signal-cli    adopt signal-cli's device [--dry-run] [--account N] [--signal-cli-dir D]
-signal-headless --daemon               run the device in the foreground
+signal-headless --link [--name N]      link this computer (QR code)
+signal-headless --unlink [--force]     remove this device from the account (history is kept)
+signal-headless --import-signal-cli    take over signal-cli's device [--dry-run] [--account N]
 signal-headless --send TO -m TEXT [-a FILE]...
-                                       TO: +number, contact or group name, UUID, group id, or "self"
-signal-headless --status               account, connection, clients, daemon version
-signal-headless --check [--json]       linked? (exit status 3 if not)
-signal-headless --stop                 stop the daemon (clients start it again when needed)
-signal-headless --version [--json]     version (and, with --json, the protocol version)
-signal-headless … jsonRpc              signal-cli-compatible stdio bridge (see below)
+                                       TO: +number, contact or group name, or "self"
+signal-headless --status               account, connection, clients, version
+signal-headless --check                linked? (exit status 3 if not)
+signal-headless --stop                 stop the background service (clients start it again)
+signal-headless --update               update to the latest release
+signal-headless --uninstall [--retain] remove it (and, unless --retain, unlink and delete the data)
+signal-headless --version
 ```
 
-## Client protocol
+Scripts and other clients can use the service's socket directly; see
+[docs/protocol.md](docs/protocol.md), which also covers the signal-cli
+compatible `jsonRpc` mode.
 
-JSON-RPC 2.0 on the unix socket, one JSON object per line: the same framing
-as `signal-cli jsonRpc`.
+## Always on
 
-**signal-cli compatibility.** A new connection behaves like signal-cli:
-incoming and synced messages arrive as `receive` notifications in
-signal-cli's envelope format, once their attachments are downloaded, with
-`attachments[].id` naming a file in the attachments directory. `send`
-(`recipient`, `groupId`, `message`, `attachments`, `quoteTimestamp`,
-`quoteAuthor`), `sendReaction` and `remoteDelete` accept signal-cli's
-parameters. Run as `signal-headless … jsonRpc` (signal-cli's other flags are
-ignored), the binary connects stdin/stdout to the daemon, starting it if
-needed. That makes it a drop-in for tools like signal_agent:
+The service starts by itself when a client needs it and keeps running after
+the client closes. To have it running from boot on Linux, install with
+`--systemd` (or later: `signal-headless --update` keeps it), then:
 
 ```bash
-SIGNAL_CLI=$HOME/.local/bin/signal-headless
-SIGNAL_CONFIG=$HOME/.local/share/signal-headless
+systemctl --user start signal-headless
+loginctl enable-linger "$USER"      # keep running without a login session
+journalctl --user -u signal-headless -f
 ```
 
-**Native API.** After `subscribe`, a connection gets native events instead:
+What the service does on its own: it receives and stores messages, edits,
+reactions and receipts; follows the account's settings (read receipts,
+typing indicators, link previews); applies disappearing-message timers;
+downloads attachments in the background; and mirrors deletions made on the
+phone. Calls, polls and payments show as short notes ("answer on the
+phone").
 
-| Event | |
+**Where things are** (Linux; macOS uses `~/Library/Application Support/signal-headless`,
+Windows `%LOCALAPPDATA%\signal-headless`):
+
+| Where | What |
 |---|---|
-| `message` | a new message (incoming, or sent from any of our devices) |
-| `messageUpdate` | edits, deletions, reactions, receipts, attachment progress |
-| `messageRemoved` | a message is gone for good (placeholder expired, delete-for-me) |
-| `thread` | a conversation changed (unread count, title, timer) |
-| `history` | a conversation's history was imported or purged: reload it |
-| `typing`, `connection`, `contacts` | typing indicators; status changes; contact list changed |
+| `~/.local/share/signal-headless/signal-headless.db` | keys, contacts, message history |
+| `~/.local/share/signal-headless/attachments/` | downloaded attachments |
+| `~/.local/share/signal-headless/daemon.log` | the log, when started in the background |
+| `$XDG_RUNTIME_DIR/signal-headless.sock` | the socket clients connect to |
 
-| Method | Parameters → result |
-|---|---|
-| `status`, `version` | → account, connection, clients, history transfer, link-preview setting |
-| `listThreads`, `getThread` | `thread` → conversations |
-| `getMessages` | `thread`, `before`, `limit` → the newest `limit` messages before `before`, oldest first |
-| `search` | `query`, `thread`?, `limit` → messages |
-| `send` | `thread` or `to`, `body`, `attachments`, `quote`, `previews` → message |
-| `linkPreview` | `url` → preview (fetched; pass it back in `send`) |
-| `sendReaction`, `remoteDelete`, `sendTyping`, `markRead` | reactions, delete for everyone, typing, read |
-| `archiveThread` | `thread`, `archived` |
-| `listContacts`, `listGroups`, `resolve` | contacts; groups; name/number → conversation |
-| `retryAttachment`, `retryFailedAttachments` | `messageId`; everything that failed |
-| `stats` | → counts, database and attachment sizes |
-| `purge` | `before`, `thread`?, `dryRun`, `allDevices` → what was (or would be) deleted |
-| `unlink` | `number` (the account's, as confirmation) |
-| `shutdown` | stop the daemon (e.g. after an upgrade; clients restart it) |
-
-`status` includes `protocol`, the API version (`rpc.ProtocolVersion`, now
-1; 0 or missing from older daemons). The daemon keeps running across
-upgrades, so clients should check it and ask for a restart (`shutdown`) when
-it is too old for them.
-
-`purge` deletes this computer's copy only, unless `allDevices` is set. Then it
-first sends the "delete for me" sync to the account's other devices, and
-deletes nothing if that fails. Types are in `internal/model` and
-`internal/rpc/api.go`.
-
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"listThreads"}' | signal-headless jsonRpc
-```
+| Option | Environment | |
+|---|---|---|
+| `--data DIR` | `SIGNAL_HEADLESS_DATA` | data directory |
+| `--socket PATH` | `SIGNAL_HEADLESS_SOCKET` | the socket |
+| `--deleted-ttl 1h` | | how long "This message was deleted." placeholders stay |
+| `-v` | | debug logging |
+| | `SIGNAL_HEADLESS_BELL=0` | terminal UI: no bell for other conversations |
+| | `SIGNAL_HEADLESS_LINK_PREVIEWS=on\|off` | terminal UI: override the account's link-preview setting |
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| Symptom | Fix |
 |---|---|
-| `no linked Signal device` (exit 3) | Link with `--link` (or the VS Code extension). |
-| `signal-cli is running …` | signal-cli uses the same identity; stop it (`systemctl --user stop signal_agent.service`) and keep it stopped. |
-| `another daemon is using …` | A daemon is already running; clients connect to it. `signal-headless --stop` stops it. |
-| Status shows `logged-out` | The phone removed this device. `signal-headless --unlink --force` (daemon stopped), then `--link`. |
-| Attachments "not downloaded" | Old or expired media, or the transfer didn't include it. Retry (`R`, or Diagnostics in VS Code); what Signal no longer holds stays on the phone. |
-| A new feature doesn't appear | The daemon keeps running across updates; `signal-headless --stop` once and it restarts on the new version (daemons older than `--stop`: `pkill -x signal-headless`). |
+| `no linked Signal device` (exit 3) | Link with `signal-headless --link` (or the VS Code extension). |
+| `signal-cli is running …` | signal-cli uses the same identity; stop it and keep it stopped. |
+| Status shows `logged-out` | The phone removed this device. `signal-headless --unlink --force`, then `--link`. |
+| Attachments "not downloaded" | Old or expired media. Retry (`R` in the terminal UI, Diagnostics in VS Code); what Signal no longer holds stays on the phone. |
+| A new feature doesn't appear | The service kept running on the old version: `signal-headless --stop`, and it restarts on the new one. |
 
-Logs: `daemon.log` in the data directory (background daemon), `journalctl --user
--u signal-headless` (systemd), or run `signal-headless --daemon -v` in a
+Logs: `daemon.log` in the data directory, `journalctl --user -u
+signal-headless` (systemd), or run `signal-headless --daemon -v` in a
 terminal.
 
 ## Security and privacy
 
-- The data directory holds the device's private keys and all message history
-  (mode 0700; the socket is 0600). Treat it like `~/.ssh`.
-- Any process running as the same user can use the socket to read and send
+- The data directory holds this device's private keys and the message
+  history, unencrypted (readable only by this user). Treat it like `~/.ssh`,
+  and use full-disk encryption.
+- Any program running as this user can use the socket to read and send
   messages as the account.
-- The daemon fetches web pages only for links in messages *we* send, when a
-  client asks for a preview (see [What the daemon does](#what-the-daemon-does)).
-- If the computer is compromised, unlink it from the phone (Settings → Linked
-  devices).
+- Web pages are fetched only for links in messages *we* send, to build the
+  preview, like Signal's apps do; links in received messages are never
+  opened.
+- If the computer is lost or compromised, unlink it from the phone
+  (Settings → Linked devices).
 
 ## Platforms
 
-Linux x86-64 is what runs today. Releases also build Linux arm64, macOS
-(Apple Silicon and Intel) and Windows x86-64. Those are experimental: each
-is built, unit-tested and smoke-tested (a fake daemon started and stopped)
-on its own CI runner, but not yet run against a real account. See
-[docs/portability.md](docs/portability.md).
+Linux (x86-64 and arm64), macOS (Apple Silicon and Intel) and Windows
+(x86-64). See [docs/portability.md](docs/portability.md) for how each is
+built and tested.
 
-## Development
+## Donate
 
-`--fake` runs everything against an in-memory backend with seeded
-conversations, an echo contact and a simulated history transfer, in a
-scratch directory under `/tmp`. Nothing reaches Signal: `--daemon --fake`,
-`--shell --fake`, `--link --fake [--json]`. The Go tests use the same fake;
-the extension's tests run against a `--fake`
-daemon, including a real VS Code instance under xvfb (in the extension's repository).
+`signal-headless` is free and made in spare time. If it's useful, support
+helps keep it maintained: new Signal features, more platforms, fixes when
+Signal changes things.
 
-```
-main.go, *cmd.go, link.go, check.go   flags and commands
-internal/signalbackend   signalmeow adapter: the only code that talks to Signal
-internal/fakebackend     test and development backend
-internal/daemon          event handling, RPC dispatch, signal-cli compatibility
-internal/history         conversations, messages, attachments, reactions, previews (SQLite)
-internal/linkpreview     outgoing link-preview fetcher
-internal/importer        signal-cli device import
-internal/rpc             JSON-RPC server and client, API types
-internal/tui             the terminal UI (bubbletea v2)
-internal/paths           data directory and socket locations
-build/                   portable build (Docker), release packaging, install.sh, install.ps1
-.github/workflows/       CI (tests) and releases (on v* tags)
-```
+- [GitHub Sponsors](https://github.com/sponsors/jam-on): monthly or one-time
+- [Ko-fi](https://ko-fi.com/jaggedmountain): a one-off tip, no account needed
+
+Signal itself runs on donations too:
+[signal.org/donate](https://signal.org/donate/).
 
 ## License
 
 Copyright © 2026 Jeff Mattson
 
-signal-headless, the daemon and terminal UI, is free software under the **GNU Affero General Public License,
-version 3 or (at your option) any later version** (`AGPL-3.0-or-later`); see
-[LICENSE](LICENSE). The binary statically links Signal's
-[libsignal](https://github.com/signalapp/libsignal) and
+signal-headless is free software under the **GNU Affero General Public
+License, version 3 or (at your option) any later version**
+(`AGPL-3.0-or-later`); see [LICENSE](LICENSE). The binary statically links
+Signal's [libsignal](https://github.com/signalapp/libsignal) and
 [signalmeow](https://github.com/mautrix/signal), both AGPL-3.0, so the same
 terms apply to it as a whole. Other Go dependencies keep their own
 (BSD/MIT/Apache-2.0/MPL-2.0) licenses.

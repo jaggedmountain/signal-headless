@@ -31,14 +31,21 @@ import (
 // resolvePaths applies --fake defaults: a scratch data dir and socket, so a
 // fake daemon never touches the real account's store.
 func resolvePaths(o *options) paths.Paths {
-	if o.fake && o.dataDir == "" {
-		o.dataDir = filepath.Join(os.TempDir(), fmt.Sprintf("signal-headless-fake-%d", os.Getuid()))
+	if o.fake {
+		if o.dataDir == "" {
+			o.dataDir = filepath.Join(os.TempDir(), fmt.Sprintf("signal-headless-fake-%d", os.Getuid()))
+		}
+		// Also with --data: the default socket is the real daemon's.
 		if o.socket == "" {
 			o.socket = filepath.Join(o.dataDir, "signal-headless.sock")
 		}
 	}
 	return paths.Resolve(o.dataDir, o.socket)
 }
+
+// errFakeOnRealSocket: a --fake daemon must never answer on the real
+// daemon's socket, where clients would take it for the real account.
+var errFakeOnRealSocket = errors.New("--fake won't use the default socket (the real daemon's); pass --socket")
 
 // lockDataDir takes an exclusive lock so only one daemon runs per store
 // (lockFile is per platform).
@@ -55,6 +62,9 @@ func lockDataDir(p paths.Paths) (*os.File, error) {
 }
 
 func runDaemon(ctx context.Context, o *options, p paths.Paths) error {
+	if o.fake && p.Socket == paths.DefaultSocket() {
+		return errFakeOnRealSocket
+	}
 	if err := p.Ensure(); err != nil {
 		return err
 	}
@@ -90,6 +100,9 @@ func runDaemon(ctx context.Context, o *options, p paths.Paths) error {
 	if o.fake {
 		f := fakebackend.New()
 		f.Echo, f.Seed = true, true
+		if os.Getenv("SIGNAL_HEADLESS_DEMO") == "1" {
+			f = fakebackend.NewDemo() // the screenshot data set (docs/screenshot.sh)
+		}
 		be = f
 		log.Warn().Str("data", p.DataDir).Msg("Using the FAKE backend; nothing reaches Signal")
 	} else {
@@ -122,7 +135,12 @@ func runDaemon(ctx context.Context, o *options, p paths.Paths) error {
 	if cause := context.Cause(runCtx); err == nil && cause != nil && cause != context.Canceled && ctx.Err() == nil {
 		err = cause
 	}
-	log.Info().Msg("Daemon stopped")
+	if err != nil {
+		// A background daemon's stderr goes nowhere; the log is where to look.
+		log.Error().Err(err).Msg("Daemon stopped")
+	} else {
+		log.Info().Msg("Daemon stopped")
+	}
 	return err
 }
 

@@ -59,14 +59,21 @@ type Fake struct {
 	DeleteErr error
 	// Seed injects demo conversations on Run.
 	Seed bool
+
+	// demo: NewDemo's cast and conversations replace the seed.
+	demo         bool
+	groupTitle   string
+	groupMembers []string
 }
 
 var _ backend.Backend = (*Fake)(nil)
 
 func New() *Fake {
 	return &Fake{
-		ready:     make(chan struct{}),
-		EchoDelay: 300 * time.Millisecond,
+		ready:        make(chan struct{}),
+		EchoDelay:    300 * time.Millisecond,
+		groupTitle:   "Tea Party",
+		groupMembers: []string{SelfACI, AliceACI, BobACI},
 		contacts: map[string]model.Contact{
 			AliceACI:    {ID: AliceACI, Number: "+15550000001", Name: "Alice Liddell"},
 			BobACI:      {ID: BobACI, Number: "+15550000002", Profile: "Bob"},
@@ -89,7 +96,9 @@ func (f *Fake) Run(ctx context.Context, h backend.Handler) error {
 	f.mu.Unlock()
 	close(f.ready)
 	_ = h(ctx, backend.ConnectionEvent{State: model.ConnConnected})
-	if f.Seed {
+	if f.demo {
+		f.seedDemo()
+	} else if f.Seed {
 		f.seed()
 		go f.history(ctx)
 	}
@@ -185,13 +194,13 @@ func (f *Fake) Contacts(ctx context.Context) ([]model.Contact, error) {
 }
 
 func (f *Fake) Groups(ctx context.Context) ([]model.GroupInfo, error) {
-	return []model.GroupInfo{{ID: GroupID, Title: "Tea Party", Members: []string{SelfACI, AliceACI, BobACI}}}, nil
+	return []model.GroupInfo{{ID: GroupID, Title: f.groupTitle, Members: f.groupMembers}}, nil
 }
 
 func (f *Fake) ThreadInfo(ctx context.Context, thread model.ThreadID) (model.ThreadKind, string, error) {
 	switch string(thread) {
 	case GroupID:
-		return model.Group, "Tea Party", nil
+		return model.Group, f.groupTitle, nil
 	case SelfACI:
 		return model.Direct, "Note to Self", nil
 	}

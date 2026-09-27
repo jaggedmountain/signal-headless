@@ -49,6 +49,16 @@ func Resolve(dataOverride, socketOverride string) Paths {
 	return p
 }
 
+// DefaultSocket is where the real daemon listens when nothing overrides it
+// (no flags, no SIGNAL_HEADLESS_* environment): what a --fake daemon must
+// never take over.
+func DefaultSocket() string {
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
+		return filepath.Join(rt, appName+".sock")
+	}
+	return filepath.Join(defaultDataDir(), appName+".sock")
+}
+
 func (p Paths) DB() string          { return filepath.Join(p.DataDir, appName+".db") }
 func (p Paths) Attachments() string { return filepath.Join(p.DataDir, "attachments") }
 func (p Paths) DaemonLog() string   { return filepath.Join(p.DataDir, "daemon.log") }

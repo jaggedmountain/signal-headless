@@ -29,3 +29,11 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("overrides = %+v", p)
 	}
 }
+
+func TestDefaultSocketIgnoresOverrides(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1234")
+	t.Setenv("SIGNAL_HEADLESS_SOCKET", "/tmp/scratch.sock")
+	if got, want := DefaultSocket(), filepath.Join("/run/user/1234", "signal-headless.sock"); got != want {
+		t.Fatalf("DefaultSocket = %s, want %s", got, want)
+	}
+}
