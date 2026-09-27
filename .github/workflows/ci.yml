@@ -39,6 +39,7 @@ jobs:
           key: libsignal-linux-x64-${{ steps.libsignal.outputs.rev }}
       - run: make build
       - run: make test
+      - run: build/smoke.sh bin/signal-headless
       - run: make vet
       - name: gofmt
         run: test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
@@ -71,6 +72,7 @@ jobs:
           key: libsignal-darwin-arm64-${{ steps.libsignal.outputs.rev }}
       - run: make build
       - run: make test
+      - run: build/smoke.sh bin/signal-headless
       - name: Libraries libsignal needs (for the Makefile's link flags)
         if: failure()
         run: |
@@ -121,6 +123,7 @@ jobs:
           key: libsignal-windows-x64-${{ steps.libsignal.outputs.rev }}
       - run: make build
       - run: make test
+      - run: build/smoke.sh bin/signal-headless.exe
       - name: Libraries libsignal needs (for the Makefile's link flags)
         if: failure()
         run: |

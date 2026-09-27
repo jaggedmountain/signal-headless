@@ -90,6 +90,8 @@ jobs:
       - name: Build
         run: make build VERSION="$GITHUB_REF_NAME"
       - run: make test
+      - name: Smoke test (fake daemon - start, status, stop)
+        run: build/smoke.sh bin/signal-headless${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Check the glibc floor
         if: runner.os == 'Linux'
         run: |
