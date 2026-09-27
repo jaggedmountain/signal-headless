@@ -124,6 +124,15 @@ jobs:
       - run: make build
       - run: make test
       - run: build/smoke.sh bin/signal-headless.exe
+      - name: Check the Windows dependencies
+        run: |
+          # Only Windows' own DLLs: no mingw runtime (libstdc++-6.dll, ...),
+          # which a normal Windows install doesn't have.
+          objdump -p bin/signal-headless.exe | grep 'DLL Name'
+          if objdump -p bin/signal-headless.exe | grep 'DLL Name' | grep -iE 'lib[^ ]*\.dll|zlib'; then
+            echo 'depends on mingw DLLs (above)' >&2
+            exit 1
+          fi
       - name: Libraries libsignal needs (for the Makefile's link flags)
         if: failure()
         run: |

@@ -108,6 +108,16 @@ jobs:
             exit 1
           fi
           otool -l bin/signal-headless | grep -A3 LC_BUILD_VERSION
+      - name: Check the Windows dependencies
+        if: runner.os == 'Windows'
+        run: |
+          # Only Windows' own DLLs: no mingw runtime (libstdc++-6.dll, ...),
+          # which a normal Windows install doesn't have.
+          objdump -p bin/signal-headless.exe | grep 'DLL Name'
+          if objdump -p bin/signal-headless.exe | grep 'DLL Name' | grep -iE 'lib[^ ]*\.dll|zlib'; then
+            echo 'depends on mingw DLLs (above)' >&2
+            exit 1
+          fi
       - name: Package
         run: build/package.sh bin/signal-headless${{ runner.os == 'Windows' && '.exe' || '' }} ${{ matrix.platform }} dist/${{ matrix.platform }}
       - uses: actions/upload-artifact@v4

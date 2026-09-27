@@ -37,7 +37,10 @@ endif
 # and BoringSSL use; -ldl comes from the mingw-w64 dlfcn package.
 ifeq ($(OS),Windows_NT)
 BIN := bin/signal-headless.exe
-CGO_LDFLAGS += -lws2_32 -luserenv -lbcrypt -lntdll -ladvapi32 -lcrypt32 -lsecur32 -lncrypt -lole32 -loleaut32 -liphlpapi -lpsapi -lshell32 -luser32 -lsynchronization -lkernel32
+# -static: the mingw runtime (libstdc++, winpthread, libgcc) goes into the
+# .exe; Windows' own DLLs stay dynamic (mingw's lib*.a for them are import
+# libraries).
+CGO_LDFLAGS += -static -lws2_32 -luserenv -lbcrypt -lntdll -ladvapi32 -lcrypt32 -lsecur32 -lncrypt -lole32 -loleaut32 -liphlpapi -lpsapi -lshell32 -luser32 -lsynchronization -lkernel32
 endif
 
 GO_SRC := $(shell find . -name '*.go' -not -path './third_party/*') go.mod go.sum
