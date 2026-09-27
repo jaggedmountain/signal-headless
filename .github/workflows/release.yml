@@ -103,5 +103,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/release/* \
+          # v1.2.3-rc.1 and the like: a pre-release, never "latest", so
+          # install.sh and releases/latest/download/… keep the last real one.
+          pre=()
+          case $GITHUB_REF_NAME in *-*) pre=(--prerelease --latest=false) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/release/* "${pre[@]}" \
             --verify-tag --title "signal-headless $GITHUB_REF_NAME" --generate-notes

@@ -4,8 +4,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, ci-testing]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -65,3 +66,49 @@ jobs:
           key: libsignal-darwin-arm64-${{ hashFiles('Makefile') }}
       - run: make build
       - run: make test
+      - name: Libraries libsignal needs (for the Makefile's link flags)
+        if: failure()
+        run: |
+          cd third_party/libsignal
+          cargo rustc -p libsignal-ffi --profile=release --crate-type staticlib -- --print native-static-libs 2>&1 | grep -i native-static-libs || true
+
+  windows:
+    # MSYS2 MINGW64 gcc for cgo, and libsignal for Rust's
+    # x86_64-pc-windows-gnu target so both sides speak mingw
+    # (docs/portability.md).
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          install: >-
+            make git
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-clang
+            mingw-w64-x86_64-protobuf mingw-w64-x86_64-zlib mingw-w64-x86_64-dlfcn
+      - name: Rust (windows-gnu host, so libsignal's rust-toolchain resolves to it)
+        run: |
+          rustup set default-host x86_64-pc-windows-gnu
+          # bindgen (boring-sys) loads libclang.dll from MSYS2.
+          echo "LIBCLANG_PATH=$(cygpath -w /mingw64/bin)" >>"$GITHUB_ENV"
+      - name: Cache libsignal
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/libsignal
+            ~/.cargo/registry
+          key: libsignal-windows-x64-${{ hashFiles('Makefile') }}
+      - run: make build
+      - run: make test
+      - name: Libraries libsignal needs (for the Makefile's link flags)
+        if: failure()
+        run: |
+          cd third_party/libsignal
+          cargo rustc -p libsignal-ffi --profile=release --crate-type staticlib -- --print native-static-libs 2>&1 | grep -i native-static-libs || true

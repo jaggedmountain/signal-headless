@@ -15,7 +15,12 @@ PREFIX  ?= $(HOME)/.local
 
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 export CGO_ENABLED := 1
-export CGO_LDFLAGS := -L$(abspath $(dir $(LIBSIGNAL_LIB)))
+LIBSIGNAL_LIBDIR := $(abspath $(dir $(LIBSIGNAL_LIB)))
+ifeq ($(OS),Windows_NT)
+# MSYS2 (MINGW64): the native Go and gcc need D:/… paths.
+LIBSIGNAL_LIBDIR := $(shell cygpath -m $(LIBSIGNAL_LIBDIR))
+endif
+export CGO_LDFLAGS := -L$(LIBSIGNAL_LIBDIR)
 
 # macOS: signalmeow's cgo flags ask for -lstdc++, which Xcode no longer ships.
 # An empty libstdc++.a next to libsignal_ffi.a satisfies the flag, and libc++
@@ -25,6 +30,14 @@ ifeq ($(shell uname -s),Darwin)
 export MACOSX_DEPLOYMENT_TARGET ?= 11.0
 CGO_LDFLAGS += -lc++ -framework Security -framework CoreFoundation -framework SystemConfiguration
 STDCXX_STUB := $(dir $(LIBSIGNAL_LIB))libstdc++.a
+endif
+
+# Windows, built with MSYS2 MINGW64 gcc and Rust's x86_64-pc-windows-gnu
+# target (see docs/portability.md): the system libraries Rust's std, tokio
+# and BoringSSL use; -ldl comes from the mingw-w64 dlfcn package.
+ifeq ($(OS),Windows_NT)
+BIN := bin/signal-headless.exe
+CGO_LDFLAGS += -lws2_32 -luserenv -lbcrypt -lntdll -ladvapi32 -lcrypt32 -lsecur32 -lncrypt -lole32 -loleaut32 -liphlpapi -lpsapi -lshell32 -luser32 -lsynchronization -lkernel32
 endif
 
 GO_SRC := $(shell find . -name '*.go' -not -path './third_party/*') go.mod go.sum

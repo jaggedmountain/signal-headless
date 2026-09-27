@@ -20,7 +20,7 @@ mkdir -p "$OUT"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/signal-headless"
-install -m755 "$BIN" "$stage/signal-headless/signal-headless"
+install -m755 "$BIN" "$stage/signal-headless/$(basename "$BIN")"  # signal-headless or signal-headless.exe
 install -m644 LICENSE README.md signal-headless.service "$stage/signal-headless/"
 # Reproducible-ish: fixed owner and order, times from the last commit.
 mtime=$(git log -1 --format=%ct 2>/dev/null || date +%s)
