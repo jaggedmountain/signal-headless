@@ -85,6 +85,10 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
+    env:
+      # Without these, BoringSSL's CMake looks for MSVC's cl.
+      CC: gcc
+      CXX: g++
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
