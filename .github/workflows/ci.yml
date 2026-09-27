@@ -40,6 +40,7 @@ jobs:
       - run: make build
       - run: make test
       - run: build/smoke.sh bin/signal-headless
+      - run: build/test-install.sh bin/signal-headless linux-x64
       - run: make vet
       - name: gofmt
         run: test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
@@ -73,6 +74,10 @@ jobs:
       - run: make build
       - run: make test
       - run: build/smoke.sh bin/signal-headless
+      - name: install.sh and uninstall.sh
+        run: |
+          brew install gnu-tar  # build/package.sh
+          build/test-install.sh bin/signal-headless darwin-arm64
       - name: Libraries libsignal needs (for the Makefile's link flags)
         if: failure()
         run: |
@@ -138,7 +143,7 @@ jobs:
         run: ./build/smoke.ps1 bin/signal-headless.exe
       - name: Package for install.ps1
         run: build/package.sh bin/signal-headless.exe windows-x64 dist/mirror/download/v0.0.0
-      - name: install.ps1 in Windows PowerShell 5.1 and PowerShell 7
+      - name: install.ps1, update.ps1 and uninstall.ps1 in Windows PowerShell 5.1 and PowerShell 7
         shell: pwsh
         run: |
           $server = Start-Process python -ArgumentList '-m', 'http.server', '8767', '--directory', 'dist/mirror' -PassThru -WindowStyle Hidden
@@ -151,6 +156,13 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed in $ps" }
               & (Join-Path $dir 'signal-headless.exe') --version
               if (-not ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' -contains $dir)) { throw "$dir not added to the user PATH ($ps)" }
+              & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir 'update.ps1') -Version v0.0.0
+              if ($LASTEXITCODE -ne 0) { throw "update.ps1 failed in $ps" }
+              & (Join-Path $dir 'signal-headless.exe') --uninstall
+              & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir 'uninstall.ps1') -Yes
+              if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 failed in $ps" }
+              if (Test-Path $dir) { throw "$dir still there after uninstall.ps1 ($ps)" }
+              if ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' -contains $dir) { throw "$dir still on the user PATH ($ps)" }
             }
           } finally {
             Stop-Process -Id $server.Id -Force

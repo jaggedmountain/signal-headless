@@ -103,6 +103,20 @@ before.
    that, not overwriting). CI runs it in Windows PowerShell 5.1 and
    PowerShell 7 against the job's own package. The VS Code extension looks
    there too, and downloads the daemon itself when nothing is installed.
+   Updating: both installers also write an updater (`update.sh` /
+   `update.ps1`, same places) that fetches the latest release's installer,
+   checks it against `SHA256SUMS`, and runs it with this install's options;
+   `signal-headless --update` runs it on every OS (on Windows the installer
+   renames the running `.exe`, so it can replace it). A daemon under this
+   install's systemd unit is restarted on the new version.
+   Uninstalling: both installers write an uninstaller with the install's
+   paths (`PREFIX/libexec/signal-headless/uninstall.sh`, not under `share/`,
+   which on Linux is the data directory; `uninstall.ps1` next to the
+   `.exe`). `signal-headless --uninstall` runs it (Unix) or prints the
+   command (Windows). By default they unlink this computer and delete the
+   message history and keys (plaintext on disk); `--retain`/`-Retain`
+   keeps them. They delete only their own files, confirm first, and CI
+   runs them on all three OSes.
 4. **Windows specifics:** desktop notifications (PowerShell toast APIs, or
    leave them to VS Code); keep AF_UNIX paths under ~100 characters, fine
    for `%LOCALAPPDATA%` with normal user names; no background service yet.

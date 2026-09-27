@@ -56,6 +56,17 @@ arm64 and macOS are experimental), checks it against the release's `SHA256SUMS`,
 `~/.local/bin`. `… | sh -s -- --systemd` also sets up the systemd user
 service (Linux); `--version v0.1.0` pins a release. Or build from source (below).
 
+To update: `signal-headless --update`, which runs the latest release's
+installer with the options this install used (prefix, `--systemd`, mirror)
+and restarts the daemon on the new version. History, keys and the link are
+kept.
+
+To remove it: `signal-headless --uninstall`. That also unlinks this
+computer from the Signal account and deletes its message history and keys,
+which are stored unencrypted; `--uninstall --retain` keeps them. (On
+Windows it prints the command to run, since a running `.exe` can't delete
+itself.)
+
 With the [VS Code extension](https://github.com/jaggedmountain/signal-headless-vscode),
 none of this is needed: it finds this install or downloads the matching
 release itself, and links with a QR code panel.

@@ -111,6 +111,153 @@ try {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
+# The uninstaller, next to the .exe (signal-headless --uninstall points to
+# it): this install's directory, then a fixed body.
+$uninstallBody = @'
+$ErrorActionPreference = 'Stop'
+$exe = Join-Path $InstallDir 'signal-headless.exe'
+
+# Native commands with stderr and a relaxed error preference (see install.ps1).
+function Native([string]$cmd) {
+  $ErrorActionPreference = 'Continue'
+  & $cmd @args 2>$null
+}
+function Interactive([string]$cmd) {
+  $ErrorActionPreference = 'Continue'
+  & $cmd @args
+}
+function Ask([string]$q) {
+  if ($Yes) { return $true }
+  return ((Read-Host "$q [y/N]") -match '^(y|yes)$')
+}
+
+$data = $null
+$linked = $false
+if (Test-Path $exe) {
+  $info = Native $exe --check --json
+  $linked = ($LASTEXITCODE -eq 0)
+  try { $data = ($info | ConvertFrom-Json).dataDir } catch { }
+}
+$Purge = -not $Retain
+if ($Purge) {
+  $msg = "This removes signal-headless ($exe)"
+  if ($linked) { $msg += ', unlinks this computer from the Signal account' }
+  if ($data -and (Test-Path $data)) { $msg += ", and deletes its message history and keys ($data)" }
+  Write-Host "$msg."
+  Write-Host 'To keep the history and keys instead, uninstall with -Retain.'
+} else {
+  Write-Host "This removes signal-headless ($exe); message history and keys stay in $data."
+}
+if (-not (Ask 'Continue?')) { Write-Host 'Nothing changed.'; return }
+
+if ($Purge -and $linked) {
+  Interactive $exe --unlink
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host 'Unlinking failed. Deleting the data anyway leaves this computer listed on the phone'
+    Write-Host '(remove it there: Settings > Linked devices).'
+    if (-not (Ask 'Delete the data anyway?')) { Write-Host 'Stopped; the program is still installed.'; return }
+  }
+}
+if (Test-Path $exe) {
+  Native $exe --stop | Out-Null
+  for ($i = 0; $i -lt 50; $i++) {
+    Native $exe --status | Out-Null
+    if ($LASTEXITCODE -ne 0) { break }
+    Start-Sleep -Milliseconds 200
+  }
+  # The .exe can't be deleted while the daemon still has it open.
+  Get-Process signal-headless -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -eq $exe } | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+}
+if ($Purge -and $data -and (Test-Path $data)) {
+  Remove-Item -Recurse -Force $data
+  Write-Host "Deleted $data."
+}
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($userPath) {
+  $kept = $userPath.Split(';') | Where-Object { $_ -and ($_.TrimEnd('\') -ine $InstallDir.TrimEnd('\')) }
+  [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
+}
+# Only our own files, never the whole directory: -InstallDir may be shared.
+foreach ($f in 'signal-headless.exe', 'signal-headless.exe.old', 'LICENSE', 'README.md', 'update.ps1', 'uninstall.ps1') {
+  Remove-Item -Force (Join-Path $InstallDir $f) -ErrorAction SilentlyContinue
+}
+if (-not (Get-ChildItem -Force $InstallDir -ErrorAction SilentlyContinue)) {
+  Remove-Item -Force $InstallDir -ErrorAction SilentlyContinue
+}
+Write-Host 'Removed signal-headless.'
+if (-not $Purge -and $data -and (Test-Path $data)) {
+  Write-Host "Kept $data."
+  if ($linked) {
+    Write-Host 'This computer is still linked. To remove it from the account later: reinstall and run'
+    Write-Host 'signal-headless --unlink, or remove it on the phone (Settings > Linked devices).'
+  }
+}
+'@
+$uninstaller = @(
+  "# Written by signal-headless's install.ps1; removes that install.",
+  '#',
+  '#   uninstall.ps1           unlink this computer from the Signal account, delete its',
+  '#                           message history and keys, and remove the program',
+  '#   uninstall.ps1 -Retain   remove only the program; history and keys stay',
+  '#   -Yes                    no "are you sure" (unlinking still asks for the number)',
+  'param([switch]$Retain, [switch]$Yes)',
+  ('$InstallDir = ''' + $InstallDir.Replace("'", "''") + ''''),
+  $uninstallBody
+) -join [Environment]::NewLine
+Set-Content -Path (Join-Path $InstallDir 'uninstall.ps1') -Value $uninstaller -Encoding ASCII
+
+# The updater: the latest release's install.ps1 with this install's options.
+# `signal-headless --update` runs it.
+$updateBody = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+if (-not $Version) { $Version = 'latest' }
+if ($Version -eq 'latest') {
+  $url = "$BaseUrl/latest/download"
+} else {
+  if (-not $Version.StartsWith('v')) { $Version = "v$Version" }
+  $url = "$BaseUrl/download/$Version"
+}
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('signal-headless-update-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory $tmp | Out-Null
+try {
+  $installer = Join-Path $tmp 'install.ps1'
+  Invoke-WebRequest -UseBasicParsing -Uri "$url/install.ps1" -OutFile $installer
+  Invoke-WebRequest -UseBasicParsing -Uri "$url/SHA256SUMS" -OutFile (Join-Path $tmp 'SHA256SUMS')
+  $want = $null
+  foreach ($line in Get-Content (Join-Path $tmp 'SHA256SUMS')) {
+    $f = $line.Trim() -split '\s+'
+    if ($f.Count -eq 2 -and $f[1].TrimStart('*') -eq 'install.ps1') { $want = $f[0] }
+  }
+  if (-not $want -or (Get-FileHash -Algorithm SHA256 $installer).Hash -ne $want.ToUpperInvariant()) {
+    throw "update.ps1: install.ps1 doesn't match the release's SHA256SUMS; not running it"
+  }
+  $opts = @{ Version = $Version; InstallDir = $InstallDir; BaseUrl = $BaseUrl }
+  if ($NoPath) { $opts.NoPath = $true }
+  & $installer @opts
+} finally {
+  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+'@
+$updater = @(
+  "# Written by signal-headless's install.ps1; updates that install with the same",
+  '# options. History, keys and the link are kept.',
+  '#',
+  '#   update.ps1                    the latest release',
+  '#   update.ps1 -Version vX.Y.Z    a specific one',
+  'param([string]$Version = ''latest'')',
+  ('$InstallDir = ''' + $InstallDir.Replace("'", "''") + ''''),
+  ('$BaseUrl = ''' + $BaseUrl.Replace("'", "''") + ''''),
+  ('$NoPath = $' + ([bool]$NoPath).ToString().ToLowerInvariant()),
+  $updateBody
+) -join [Environment]::NewLine
+Set-Content -Path (Join-Path $InstallDir 'update.ps1') -Value $updater -Encoding ASCII
+
 $onWindows = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
 $onPath = $false
 foreach ($p in $env:PATH.Split([IO.Path]::PathSeparator)) {

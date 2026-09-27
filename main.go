@@ -9,6 +9,8 @@
 //	signal-headless --daemon                 run the device: receive, store, serve clients
 //	signal-headless --shell                  interactive TUI (starts the daemon if needed)
 //	signal-headless --send TO -m TEXT [-a FILE]...   one-shot send via the daemon
+//	signal-headless --update                 update an install.sh/install.ps1 install
+//	signal-headless --uninstall [--retain]   remove one
 //
 // The daemon is the only process that talks to Signal. Everything else is a
 // client of its unix socket.
@@ -40,7 +42,7 @@ func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
 type options struct {
-	link, unlink, force, daemon, shell, importCLI, status, showVersion bool
+	link, unlink, force, daemon, shell, importCLI, status, showVersion, update, uninstall, retain bool
 
 	sendTo      string
 	message     string
@@ -75,6 +77,9 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.stop, "stop", false, "stop the running daemon (clients start it again when needed)")
 	fs.BoolVar(&o.json, "json", false, "--link, --check, --version: machine-readable output (JSON lines)")
 	fs.BoolVar(&o.showVersion, "version", false, "print version")
+	fs.BoolVar(&o.update, "update", false, "update this install to the latest release, with the options it was installed with")
+	fs.BoolVar(&o.uninstall, "uninstall", false, "remove this install: unlink this computer, delete its message history and keys, remove the program")
+	fs.BoolVar(&o.retain, "retain", false, "--uninstall: keep the message history and keys")
 	fs.StringVar(&o.sendTo, "send", "", "send a message to `RECIPIENT` (+E164, UUID, group ID, contact name, or 'self')")
 	fs.StringVar(&o.message, "m", "", "message text for --send (default: read stdin)")
 	fs.Var(&o.attachments, "a", "attachment `FILE` for --send (repeatable)")
@@ -89,7 +94,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.foreground, "foreground", true, "daemon: log to stderr (false: log to data dir)")
 	fs.DurationVar(&o.deletedTTL, "deleted-ttl", daemon.DefaultDeletedTTL, "daemon: how long \"This message was deleted.\" placeholders stay")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: signal-headless [--link | --unlink [--force] | --import-signal-cli | --daemon | --shell | --send TO | --status | --check]\n\n")
+		fmt.Fprintf(fs.Output(), "usage: signal-headless [--link | --unlink [--force] | --import-signal-cli | --daemon | --shell | --send TO | --status | --check | --stop | --update | --uninstall [--retain]]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -99,13 +104,16 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	modes := 0
-	for _, b := range []bool{o.link, o.unlink, o.importCLI, o.daemon, o.shell, o.status, o.check, o.stop, o.showVersion, o.sendTo != ""} {
+	for _, b := range []bool{o.link, o.unlink, o.importCLI, o.daemon, o.shell, o.status, o.check, o.stop, o.showVersion, o.update, o.uninstall, o.sendTo != ""} {
 		if b {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return nil, errors.New("choose one of --link, --unlink, --import-signal-cli, --daemon, --shell, --send, --status, --check, --stop, --version")
+		return nil, errors.New("choose one of --link, --unlink, --import-signal-cli, --daemon, --shell, --send, --status, --check, --stop, --version, --update, --uninstall")
+	}
+	if o.retain && !o.uninstall {
+		return nil, errors.New("--retain goes with --uninstall")
 	}
 	if modes == 0 {
 		o.shell = true
@@ -176,6 +184,10 @@ func main() {
 		err = runCheck(ctx, o, p)
 	case o.stop:
 		err = runStop(ctx, o, p)
+	case o.update:
+		err = runUpdate(p)
+	case o.uninstall:
+		err = runUninstall(p, o.retain)
 	case o.sendTo != "":
 		err = runSend(ctx, o, p)
 	case o.shell:
