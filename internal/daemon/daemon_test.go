@@ -80,10 +80,14 @@ func (e *env) dial(native bool) *rpc.Client {
 		e.t.Fatal(err)
 	}
 	e.t.Cleanup(func() { c.Close() })
+	// A round trip: Dial returns once the kernel has the connection, but
+	// broadcasts only reach it after the server's accept loop registers it.
+	method := rpc.MVersion
 	if native {
-		if err := c.Call(context.Background(), rpc.MSubscribe, nil, nil); err != nil {
-			e.t.Fatal(err)
-		}
+		method = rpc.MSubscribe
+	}
+	if err := c.Call(context.Background(), method, nil, nil); err != nil {
+		e.t.Fatal(err)
 	}
 	return c
 }

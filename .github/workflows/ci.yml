@@ -27,14 +27,16 @@ jobs:
         run: |
           curl -sSfL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
           sudo unzip -o -q /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+      - name: libsignal revision
+        id: libsignal
+        run: echo "rev=$(awk '$1 == "LIBSIGNAL_REV" { print $3 }' Makefile)" >>"$GITHUB_OUTPUT"
       - name: Cache libsignal
         uses: actions/cache@v4
         with:
           path: |
             third_party/libsignal
             ~/.cargo/registry
-          # LIBSIGNAL_REV lives in the Makefile.
-          key: libsignal-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          key: libsignal-linux-x64-${{ steps.libsignal.outputs.rev }}
       - run: make build
       - run: make test
       - run: make vet
@@ -57,13 +59,16 @@ jobs:
         run: |
           command -v rustup >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - name: libsignal revision
+        id: libsignal
+        run: echo "rev=$(awk '$1 == "LIBSIGNAL_REV" { print $3 }' Makefile)" >>"$GITHUB_OUTPUT"
       - name: Cache libsignal
         uses: actions/cache@v4
         with:
           path: |
             third_party/libsignal
             ~/.cargo/registry
-          key: libsignal-darwin-arm64-${{ hashFiles('Makefile') }}
+          key: libsignal-darwin-arm64-${{ steps.libsignal.outputs.rev }}
       - run: make build
       - run: make test
       - name: Libraries libsignal needs (for the Makefile's link flags)
@@ -98,13 +103,16 @@ jobs:
           rustup set default-host x86_64-pc-windows-gnu
           # bindgen (boring-sys) loads libclang.dll from MSYS2.
           echo "LIBCLANG_PATH=$(cygpath -w /mingw64/bin)" >>"$GITHUB_ENV"
+      - name: libsignal revision
+        id: libsignal
+        run: echo "rev=$(awk '$1 == "LIBSIGNAL_REV" { print $3 }' Makefile)" >>"$GITHUB_OUTPUT"
       - name: Cache libsignal
         uses: actions/cache@v4
         with:
           path: |
             third_party/libsignal
             ~/.cargo/registry
-          key: libsignal-windows-x64-${{ hashFiles('Makefile') }}
+          key: libsignal-windows-x64-${{ steps.libsignal.outputs.rev }}
       - run: make build
       - run: make test
       - name: Libraries libsignal needs (for the Makefile's link flags)

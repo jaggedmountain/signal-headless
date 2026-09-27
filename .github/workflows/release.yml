@@ -52,13 +52,16 @@ jobs:
           # libsignal's rust-toolchain file picks the toolchain; rustup fetches it.
           command -v rustup >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - name: libsignal revision
+        id: libsignal
+        run: echo "rev=$(awk '$1 == "LIBSIGNAL_REV" { print $3 }' Makefile)" >>"$GITHUB_OUTPUT"
       - name: Cache libsignal
         uses: actions/cache@v4
         with:
           path: |
             third_party/libsignal
             ~/.cargo/registry
-          key: libsignal-${{ matrix.platform }}-${{ hashFiles('Makefile') }}
+          key: libsignal-${{ matrix.platform }}-${{ steps.libsignal.outputs.rev }}
       - name: Build
         run: make build VERSION="$GITHUB_REF_NAME"
       - run: make test
