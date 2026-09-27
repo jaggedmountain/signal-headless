@@ -27,8 +27,12 @@ jobs:
           - { platform: linux-arm64, runner: ubuntu-22.04-arm, protoc: linux-aarch_64, experimental: true }
           - { platform: darwin-arm64, runner: macos-14, experimental: true }
           - { platform: darwin-x64, runner: macos-15-intel, experimental: true }
+          - { platform: windows-x64, runner: windows-latest, shell: 'msys2 {0}', experimental: true }
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental == true }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell || 'bash' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,10 +48,31 @@ jobs:
           # 22.04's protoc 3.12 predates proto3 optional fields, which libsignal uses.
           curl -sSfL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-${{ matrix.protoc }}.zip"
           sudo unzip -o -q /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+      - name: Build dependencies (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          install: >-
+            make git
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-clang
+            mingw-w64-x86_64-protobuf mingw-w64-x86_64-zlib mingw-w64-x86_64-dlfcn
+      - name: Toolchain settings (Windows; see ci.yml)
+        if: runner.os == 'Windows'
+        run: |
+          rustup set default-host x86_64-pc-windows-gnu
+          {
+            echo "LIBCLANG_PATH=$(cygpath -w /mingw64/bin)"
+            echo "CC=gcc"
+            echo "CXX=g++"
+            echo "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_gnu=$(cygpath -m "$PWD/build/windows-boringssl.cmake")"
+          } >>"$GITHUB_ENV"
       - name: Build dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf gnu-tar
       - name: Rust
+        if: runner.os != 'Windows'  # preinstalled there, set up above
         run: |
           # libsignal's rust-toolchain file picks the toolchain; rustup fetches it.
           command -v rustup >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
@@ -82,7 +107,7 @@ jobs:
           fi
           otool -l bin/signal-headless | grep -A3 LC_BUILD_VERSION
       - name: Package
-        run: build/package.sh bin/signal-headless ${{ matrix.platform }} dist/${{ matrix.platform }}
+        run: build/package.sh bin/signal-headless${{ runner.os == 'Windows' && '.exe' || '' }} ${{ matrix.platform }} dist/${{ matrix.platform }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}

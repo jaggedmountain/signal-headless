@@ -89,11 +89,6 @@ jobs:
       # Without these, BoringSSL's CMake looks for MSVC's cl.
       CC: gcc
       CXX: g++
-      # boring-sys turns BoringSSL's assembly off on Windows hosts, but only
-      # as a CMake option; its C headers still call the assembly-only ADX
-      # routines (fiat_p256_adx_*) unless the macro reaches the compiler.
-      CFLAGS_x86_64_pc_windows_gnu: -DOPENSSL_NO_ASM
-      CXXFLAGS_x86_64_pc_windows_gnu: -DOPENSSL_NO_ASM
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -112,6 +107,8 @@ jobs:
           rustup set default-host x86_64-pc-windows-gnu
           # bindgen (boring-sys) loads libclang.dll from MSYS2.
           echo "LIBCLANG_PATH=$(cygpath -w /mingw64/bin)" >>"$GITHUB_ENV"
+          # BoringSSL without assembly (see the file).
+          echo "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_gnu=$(cygpath -m "$PWD/build/windows-boringssl.cmake")" >>"$GITHUB_ENV"
       - name: libsignal revision
         id: libsignal
         run: echo "rev=$(awk '$1 == "LIBSIGNAL_REV" { print $3 }' Makefile)" >>"$GITHUB_OUTPUT"
