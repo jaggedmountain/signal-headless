@@ -17,8 +17,16 @@ import (
 )
 
 // confirmNumber asks the user to type the account number.
+// SIGNAL_HEADLESS_CONFIRM, set to the number, answers for callers without a
+// terminal (the VS Code extension's removal, through the uninstall scripts).
 func confirmNumber(what, number string) error {
 	fmt.Println(what)
+	if v := os.Getenv("SIGNAL_HEADLESS_CONFIRM"); v != "" {
+		if strings.TrimSpace(v) != number {
+			return fmt.Errorf("SIGNAL_HEADLESS_CONFIRM doesn't match the account number; nothing changed")
+		}
+		return nil
+	}
 	fmt.Printf("Type the account number (%s) to confirm: ", number)
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && line == "" {

@@ -636,3 +636,17 @@ func TestLocalOrigin(t *testing.T) {
 		t.Fatalf("localOrigin by body = %v", got)
 	}
 }
+
+// status names the daemon's binary, so a client can tell whether its own
+// download is the one running (the VS Code extension's uninstall hook).
+func TestStatusExecutable(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	var st rpc.StatusResult
+	e.call(c, rpc.MStatus, nil, &st)
+	self, _ := os.Executable()
+	self, _ = filepath.EvalSymlinks(self)
+	if st.Executable == "" || st.Executable != self {
+		t.Fatalf("executable = %q, want %q", st.Executable, self)
+	}
+}

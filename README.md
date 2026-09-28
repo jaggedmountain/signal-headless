@@ -139,7 +139,7 @@ on). The terminal bell rings for messages in other conversations
 ## VS Code
 
 The [VS Code extension](https://github.com/jaggedmountain/signal-headless-vscode)
-(`JaggedMountain.signal-headless`) is a full client: notifications that
+(`jaggedmountain.signal-headless`) is a full client: notifications that
 appear once even with several windows open, an unread count in the status
 bar, a conversations view, chat tabs, search, link previews, and linking
 from a QR code panel. It runs on the local side of Remote-SSH windows.
@@ -209,6 +209,7 @@ Windows `%LOCALAPPDATA%\signal-headless`):
 | `--socket PATH` | `SIGNAL_HEADLESS_SOCKET` | the socket |
 | `--deleted-ttl 1h` | | how long "This message was deleted." placeholders stay |
 | `-v` | | debug logging |
+| | `SIGNAL_HEADLESS_CONFIRM=+NUMBER` | `--unlink`: confirm with the account number without a terminal (scripts, the VS Code extension) |
 | | `SIGNAL_HEADLESS_BELL=0` | terminal UI: no bell for other conversations |
 | | `SIGNAL_HEADLESS_LINK_PREVIEWS=on\|off` | terminal UI: override the account's link-preview setting |
 

@@ -84,6 +84,9 @@ type StatusResult struct {
 	Clients    int             `json:"clients"`
 	Version    string          `json:"version"`
 	Protocol   int             `json:"protocol"` // ProtocolVersion (0 from daemons before versioning)
+	// Executable is the daemon's own binary (symlinks resolved), so a client
+	// can tell whose copy is running (e.g. its own download).
+	Executable string `json:"executable,omitempty"`
 	// LinkPreviews is the account's "Generate link previews" setting.
 	LinkPreviews bool `json:"linkPreviews"`
 	// History is the message-history transfer's progress after linking.

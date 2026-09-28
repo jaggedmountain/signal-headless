@@ -410,7 +410,7 @@ func (d *Daemon) status() rpc.StatusResult {
 	if s, ok := d.be.(interface{ LinkPreviewsEnabled() bool }); ok {
 		lp = s.LinkPreviewsEnabled()
 	}
-	return rpc.StatusResult{Account: d.acct, Connection: d.conn, Error: d.connErr, QueueEmpty: d.queueEmpty, Clients: n, Version: d.cfg.Version, History: d.history, LinkPreviews: lp, Protocol: rpc.ProtocolVersion}
+	return rpc.StatusResult{Account: d.acct, Connection: d.conn, Error: d.connErr, QueueEmpty: d.queueEmpty, Clients: n, Version: d.cfg.Version, History: d.history, LinkPreviews: lp, Protocol: rpc.ProtocolVersion, Executable: executable()}
 }
 
 // onHistory stores one transferred conversation. Old messages are not
@@ -1167,4 +1167,16 @@ func (d *Daemon) onDeleteForMe(ctx context.Context, e backend.DeleteForMeEvent) 
 	}
 	d.log.Info().Int("messages", len(e.Messages)).Int("conversations", len(e.Conversations)).Msg("Deleted for me (from another device)")
 	return nil
+}
+
+// executable is this process's binary with symlinks resolved ("" if unknown).
+func executable() string {
+	p, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
 }
