@@ -609,3 +609,30 @@ func TestProtocolAndShutdown(t *testing.T) {
 		t.Fatal("daemon did not stop")
 	}
 }
+
+// In Note to Self, what the phone sent and what this daemon sent are both
+// outgoing; localOrigin tells them apart (--watch relies on it).
+func TestLocalOrigin(t *testing.T) {
+	e := start(t)
+	c := e.dial(true)
+	phoneTS := time.Now().UnixMilli() - 1000
+	if err := e.fake.Inject(backend.MessageEvent{Message: model.Message{
+		Thread: fakebackend.SelfACI, Author: fakebackend.SelfACI, TS: phoneTS, Body: "from the phone", Outgoing: true, Status: model.StatusSent,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var sr rpc.SendResult
+	e.call(c, rpc.MSend, rpc.SendParams{To: "self", Body: "from here"}, &sr)
+	if sr.Message == nil || !sr.Message.LocalOrigin {
+		t.Fatalf("send result = %+v", sr.Message)
+	}
+	var msgs []model.Message
+	e.call(c, rpc.MGetMessages, rpc.GetMessagesParams{Thread: fakebackend.SelfACI}, &msgs)
+	got := map[string]bool{}
+	for _, m := range msgs {
+		got[m.Body] = m.LocalOrigin
+	}
+	if len(got) != 2 || got["from the phone"] || !got["from here"] {
+		t.Fatalf("localOrigin by body = %v", got)
+	}
+}

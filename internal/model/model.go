@@ -118,14 +118,17 @@ type Reaction struct {
 }
 
 type Message struct {
-	ID          int64         `json:"id"`
-	Thread      ThreadID      `json:"thread"`
-	Author      string        `json:"author"`
-	AuthorName  string        `json:"authorName,omitempty"`
-	TS          int64         `json:"ts"`
-	ServerTS    int64         `json:"serverTs,omitempty"`
-	ReceivedAt  int64         `json:"receivedAt,omitempty"`
-	Outgoing    bool          `json:"outgoing,omitempty"`
+	ID         int64    `json:"id"`
+	Thread     ThreadID `json:"thread"`
+	Author     string   `json:"author"`
+	AuthorName string   `json:"authorName,omitempty"`
+	TS         int64    `json:"ts"`
+	ServerTS   int64    `json:"serverTs,omitempty"`
+	ReceivedAt int64    `json:"receivedAt,omitempty"`
+	Outgoing   bool     `json:"outgoing,omitempty"`
+	// LocalOrigin: sent by this computer's daemon (a client of it), not by
+	// the phone or another linked device. Outgoing covers both.
+	LocalOrigin bool          `json:"localOrigin,omitempty"`
 	Read        bool          `json:"read,omitempty"` // incoming only
 	Status      Status        `json:"status,omitempty"`
 	Body        string        `json:"body"`
@@ -136,7 +139,11 @@ type Message struct {
 	EditedAt    int64         `json:"editedAt,omitempty"`
 	Deleted     bool          `json:"deleted,omitempty"`
 	ExpiresIn   int64         `json:"expiresIn,omitempty"`
-	Sticker     string        `json:"sticker,omitempty"`
+	// ExpireStart: when the disappearing timer started (ms), if the source
+	// knows (a history import). Otherwise the store starts it when the
+	// message is read (incoming) or sent.
+	ExpireStart int64  `json:"-"`
+	Sticker     string `json:"sticker,omitempty"`
 }
 
 // Preview is a one-line summary used in thread lists and notifications.

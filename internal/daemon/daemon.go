@@ -926,7 +926,7 @@ func (d *Daemon) Send(ctx context.Context, out model.Outgoing) (*model.Message, 
 	}
 	out.TS = d.nextTS()
 	m := &model.Message{
-		Thread: out.Thread, Author: d.acct.ACI, TS: out.TS, Outgoing: true, Status: model.StatusSending,
+		Thread: out.Thread, Author: d.acct.ACI, TS: out.TS, Outgoing: true, LocalOrigin: true, Status: model.StatusSending,
 		Body: out.Body, Quote: out.Quote, ExpiresIn: int64(out.ExpireTimer),
 	}
 	for _, p := range out.Attachments {

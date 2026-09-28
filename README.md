@@ -153,6 +153,8 @@ signal-headless --unlink [--force]     remove this device from the account (hist
 signal-headless --import-signal-cli    take over signal-cli's device [--dry-run] [--account N]
 signal-headless --send TO -m TEXT [-a FILE]...
                                        TO: +number, contact or group name, or "self"
+signal-headless --watch CHANNEL        print new messages there that didn't come from this computer
+                                       [--json] [--once] [--timeout 10m] [--since ID]
 signal-headless --status               account, connection, clients, version
 signal-headless --check                linked? (exit status 3 if not)
 signal-headless --stop                 stop the background service (clients start it again)
@@ -160,6 +162,13 @@ signal-headless --update               update to the latest release
 signal-headless --uninstall [--retain] remove it (and, unless --retain, unlink and delete the data)
 signal-headless --version
 ```
+
+`--watch` is for scripts and agents that take instructions over Signal:
+`signal-headless --watch self` prints what is typed into Note to Self on
+the phone, and skips what this computer sends there (its replies). It keeps
+going across service restarts without missing messages; `--json` prints
+each message with its `id`, and `--since ID` resumes after it. `--once
+--timeout 10m` waits for a single reply (exit status 124 if none comes).
 
 Scripts and other clients can use the service's socket directly; see
 [docs/protocol.md](docs/protocol.md), which also covers the signal-cli
@@ -211,6 +220,7 @@ Windows `%LOCALAPPDATA%\signal-headless`):
 | `signal-cli is running …` | signal-cli uses the same identity; stop it and keep it stopped. |
 | Status shows `logged-out` | The phone removed this device. `signal-headless --unlink --force`, then `--link`. |
 | Attachments "not downloaded" | Old or expired media. Retry (`R` in the terminal UI, Diagnostics in VS Code); what Signal no longer holds stays on the phone. |
+| macOS: "cannot be opened" / "unidentified developer" | The binary was downloaded by hand in a browser, which quarantines it. Install with `install.sh`, or run `xattr -d com.apple.quarantine signal-headless`. |
 | A new feature doesn't appear | The service kept running on the old version: `signal-headless --stop`, and it restarts on the new one. |
 
 Logs: `daemon.log` in the data directory, `journalctl --user -u
@@ -233,8 +243,8 @@ terminal.
 ## Platforms
 
 Linux (x86-64 and arm64), macOS (Apple Silicon and Intel) and Windows
-(x86-64). See [docs/portability.md](docs/portability.md) for how each is
-built and tested.
+(x86-64). How each is built and tested:
+[CONTRIBUTING.md](CONTRIBUTING.md#platforms).
 
 ## Donate
 

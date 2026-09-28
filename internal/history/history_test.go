@@ -280,3 +280,43 @@ func TestStatsAndPurge(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A message imported with its start (from the phone's backup) keeps it: it
+// disappears when the phone's copy does, not a full timer after the import.
+func TestImportedExpireStart(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	th := model.ThreadID("erin")
+	s.EnsureThread(ctx, th, model.Direct, "")
+	now := time.Now().UnixMilli()
+	started := now - 50*60_000 // 50 minutes ago, one-hour timer
+	s.InsertMessage(ctx, &model.Message{Thread: th, Author: "erin", TS: now - 3_600_000, Body: "imported", Read: true,
+		ExpiresIn: 3600, ExpireStart: started, ReceivedAt: now})
+	if exp, _ := s.Expired(ctx, now+11*60_000); len(exp) != 1 || exp[0].Body != "imported" {
+		t.Fatalf("expired 11 minutes from now = %+v, want the imported message", exp)
+	}
+	if exp, _ := s.Expired(ctx, now+9*60_000); len(exp) != 0 {
+		t.Fatalf("expired 9 minutes from now = %+v, want none yet", exp)
+	}
+}
+
+// Message IDs only grow, even after the newest message is deleted: clients
+// (--watch) use them as a cursor, and a reused ID would be taken as seen.
+func TestMessageIDsNeverReused(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	th := model.ThreadID("frank")
+	s.EnsureThread(ctx, th, model.Direct, "")
+	first := &model.Message{Thread: th, Author: "frank", TS: 1, Body: "a"}
+	s.InsertMessage(ctx, first)
+	gone := &model.Message{Thread: th, Author: "frank", TS: 2, Body: "b"}
+	s.InsertMessage(ctx, gone)
+	if _, err := s.DeleteByRef(ctx, th, model.MessageRef{Author: "frank", TS: 2}); err != nil {
+		t.Fatal(err)
+	}
+	next := &model.Message{Thread: th, Author: "frank", TS: 3, Body: "c"}
+	s.InsertMessage(ctx, next)
+	if next.ID <= gone.ID {
+		t.Fatalf("new message got id %d, the deleted one had %d", next.ID, gone.ID)
+	}
+}

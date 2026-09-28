@@ -31,7 +31,7 @@ After `subscribe`, a connection gets native events instead:
 
 | Event | |
 |---|---|
-| `message` | a new message (incoming, or sent from any of our devices) |
+| `message` | a new message (incoming, or sent from any of our devices; `localOrigin` marks the ones this daemon sent) |
 | `messageUpdate` | edits, deletions, reactions, receipts, attachment progress |
 | `messageRemoved` | a message is gone for good (placeholder expired, delete-for-me) |
 | `thread` | a conversation changed (unread count, title, timer) |
@@ -64,3 +64,31 @@ it is too old for them.
 first sends the "delete for me" sync to the account's other devices, and
 deletes nothing if that fails. Types are in `internal/model` and
 `internal/rpc/api.go`.
+
+## Messages
+
+- `id` identifies a message on this computer. IDs only grow and are never
+  reused, even after a message is deleted, so they work as a cursor.
+- `ts` is the sender's timestamp (ms): Signal's identity for the message,
+  used in quotes and reactions. It isn't ordered by arrival.
+- `outgoing` means the account sent it, from any device; `localOrigin` means
+  this daemon sent it (a client of it), not the phone or another linked
+  device. In Note to Self, `outgoing && !localOrigin` is what was typed on
+  another device.
+- `attachments[].path` is the local file once `state` is `done`.
+
+## Following a conversation
+
+`signal-headless --watch CHANNEL` does this for scripts; a client of its own
+can do the same without gaps:
+
+1. Note the newest `id` in the conversation (`getMessages` with `limit: 1`).
+2. `subscribe`.
+3. Catch up: page back with `getMessages` until reaching that `id`, and
+   handle the newer ones in `id` order.
+4. Handle `message` events with a larger `id`; drop the ones already seen.
+5. When the connection drops (the daemon restarted), reconnect and repeat
+   from 2 with the last `id` handled.
+
+Taking the starting point before subscribing, and catching up after it,
+means nothing falls in between; comparing `id`s removes the overlap.

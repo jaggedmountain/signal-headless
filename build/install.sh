@@ -33,7 +33,7 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 case $(uname -s) in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
-  *) die "no release for $(uname -s) yet (Linux and macOS only for now; Windows: see docs/portability.md)" ;;
+  *) die "no release for $(uname -s) here (on Windows, use install.ps1 from the same release)" ;;
 esac
 case $(uname -m) in
   x86_64|amd64) arch=x64 ;;

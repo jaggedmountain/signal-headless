@@ -159,16 +159,20 @@ func (s *Store) InsertMessage(ctx context.Context, m *model.Message) (inserted b
 		}
 		read := m.Read || m.Outgoing
 		var expireStart int64
-		if m.ExpiresIn > 0 && read {
-			expireStart = m.ReceivedAt
+		if m.ExpiresIn > 0 {
+			if m.ExpireStart > 0 {
+				expireStart = m.ExpireStart
+			} else if read {
+				expireStart = m.ReceivedAt
+			}
 		}
 		res, err := s.db.Exec(ctx, `
 			INSERT INTO sh_message (thread_id, author, ts, server_ts, received_at, outgoing, read, status, body,
-				quote_author, quote_ts, quote_text, expires_in, expire_start, sticker)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+				quote_author, quote_ts, quote_text, expires_in, expire_start, sticker, local_origin)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			ON CONFLICT (thread_id, author, ts) DO NOTHING`,
 			string(m.Thread), m.Author, m.TS, m.ServerTS, m.ReceivedAt, m.Outgoing, read, string(m.Status), m.Body,
-			q.Author, q.TS, q.Text, m.ExpiresIn, expireStart, m.Sticker)
+			q.Author, q.TS, q.Text, m.ExpiresIn, expireStart, m.Sticker, m.LocalOrigin)
 		if err != nil {
 			return err
 		}
@@ -211,14 +215,14 @@ func (s *Store) InsertMessage(ctx context.Context, m *model.Message) (inserted b
 
 const messageSelect = `
 	SELECT id, thread_id, author, ts, server_ts, received_at, outgoing, read, status, body,
-		quote_author, quote_ts, quote_text, edited_at, deleted, expires_in, sticker
+		quote_author, quote_ts, quote_text, edited_at, deleted, expires_in, sticker, local_origin
 	FROM sh_message`
 
 func scanMessage(row dbutil.Scannable) (*model.Message, error) {
 	var m model.Message
 	var q model.Quote
 	err := row.Scan(&m.ID, &m.Thread, &m.Author, &m.TS, &m.ServerTS, &m.ReceivedAt, &m.Outgoing, &m.Read, &m.Status, &m.Body,
-		&q.Author, &q.TS, &q.Text, &m.EditedAt, &m.Deleted, &m.ExpiresIn, &m.Sticker)
+		&q.Author, &q.TS, &q.Text, &m.EditedAt, &m.Deleted, &m.ExpiresIn, &m.Sticker, &m.LocalOrigin)
 	if err != nil {
 		return nil, err
 	}

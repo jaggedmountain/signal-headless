@@ -65,7 +65,7 @@ var historySchema = []string{
 		expire_version INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE TABLE sh_message (
-		id          INTEGER PRIMARY KEY,
+		id          INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused: clients page and watch by id
 		thread_id   TEXT NOT NULL REFERENCES sh_thread(id) ON DELETE CASCADE,
 		author      TEXT NOT NULL,      -- ACI of the sender
 		ts          INTEGER NOT NULL,   -- sender timestamp (ms); Signal's message identity
@@ -83,11 +83,14 @@ var historySchema = []string{
 		expires_in  INTEGER NOT NULL DEFAULT 0,  -- seconds
 		expire_start INTEGER NOT NULL DEFAULT 0, -- ms; timer starts when read (incoming) or sent
 		sticker     TEXT NOT NULL DEFAULT '',
+		deleted_at  INTEGER NOT NULL DEFAULT 0,  -- ms; when its placeholder may be purged
+		local_origin INTEGER NOT NULL DEFAULT 0, -- sent by this daemon, not the phone or another device
 		UNIQUE (thread_id, author, ts)
 	);
 	CREATE INDEX sh_message_thread_ts ON sh_message (thread_id, ts);
 	CREATE INDEX sh_message_author_ts ON sh_message (author, ts);
 	CREATE INDEX sh_message_unread ON sh_message (thread_id) WHERE outgoing = 0 AND read = 0;
+	CREATE INDEX sh_message_deleted ON sh_message (deleted_at) WHERE deleted = 1;
 	CREATE TABLE sh_attachment (
 		message_id   INTEGER NOT NULL REFERENCES sh_message(id) ON DELETE CASCADE,
 		idx          INTEGER NOT NULL,
@@ -99,6 +102,7 @@ var historySchema = []string{
 		error        TEXT NOT NULL DEFAULT '',
 		voice_note   INTEGER NOT NULL DEFAULT 0,
 		pointer      BLOB,             -- serialized AttachmentPointer for (re)download
+		kind         TEXT NOT NULL DEFAULT '', -- '' for files, 'preview' for a link preview's image
 		PRIMARY KEY (message_id, idx)
 	);
 	CREATE TABLE sh_reaction (
@@ -107,15 +111,8 @@ var historySchema = []string{
 		emoji      TEXT NOT NULL,
 		ts         INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (message_id, reactor)
-	);`,
-	// v2: when a message was deleted, so its placeholder can be purged later.
-	// Placeholders from before this version get the upgrade time.
-	`ALTER TABLE sh_message ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0;
-	UPDATE sh_message SET deleted_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000 WHERE deleted = 1;
-	CREATE INDEX sh_message_deleted ON sh_message (deleted_at) WHERE deleted = 1;`,
-	// v3: link previews sent with messages; their images are attachments
-	// of kind 'preview'.
-	`ALTER TABLE sh_attachment ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+	);
+	-- Link previews sent with messages; their images are attachments of kind 'preview'.
 	CREATE TABLE sh_preview (
 		message_id  INTEGER NOT NULL REFERENCES sh_message(id) ON DELETE CASCADE,
 		idx         INTEGER NOT NULL,

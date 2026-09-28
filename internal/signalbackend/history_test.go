@@ -110,6 +110,9 @@ func TestHistoryImport(t *testing.T) {
 		}}},
 		// Deleted for everyone: dropped.
 		{ChatId: 10, AuthorId: 2, DateSent: recent + 30, DirectionalDetails: incoming(true), Item: &backuppb.ChatItem_RemoteDeletedMessage{RemoteDeletedMessage: &backuppb.RemoteDeletedMessage{}}},
+		// Disappearing, started on the phone an hour ago: imported with that
+		// start, so it goes when the phone's copy does.
+		{ChatId: 10, AuthorId: 2, DateSent: recent + 35, ExpireStartDate: u64(recent), ExpiresInMs: u64(2 * 3600_000), DirectionalDetails: incoming(true), Item: text("still counting")},
 		// Disappeared already: dropped.
 		{ChatId: 10, AuthorId: 2, DateSent: recent + 40, ExpireStartDate: u64(recent), ExpiresInMs: u64(1000), DirectionalDetails: incoming(true), Item: text("poof")},
 		// Group: an old photo (not fetched automatically) and one the
@@ -154,7 +157,7 @@ func TestHistoryImport(t *testing.T) {
 	if a.Kind != model.Direct || a.ExpireTimer != 3600 || a.ExpireVersion != 2 {
 		t.Fatalf("alice chat = %+v", a)
 	}
-	if len(a.Messages) != 3 {
+	if len(a.Messages) != 4 {
 		t.Fatalf("alice messages = %+v", a.Messages)
 	}
 	msgs := map[string]model.Message{}
@@ -168,6 +171,9 @@ func TestHistoryImport(t *testing.T) {
 	reply := msgs["hi back"]
 	if !reply.Outgoing || reply.Status != model.StatusRead || reply.Quote == nil || reply.Quote.Author != alice.String() || reply.Quote.TS != int64(recent) {
 		t.Fatalf("reply = %+v", reply)
+	}
+	if c := msgs["still counting"]; c.ExpiresIn != 7200 || c.ExpireStart != int64(recent) {
+		t.Fatalf("disappearing message: expiresIn %d, expireStart %d, want 7200, %d", c.ExpiresIn, c.ExpireStart, recent)
 	}
 	pic := msgs[""]
 	if pic.Read || len(pic.Attachments) != 1 || pic.Attachments[0].State != model.AttachmentPending {

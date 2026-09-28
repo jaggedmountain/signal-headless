@@ -45,6 +45,10 @@ type options struct {
 	link, unlink, force, daemon, shell, importCLI, status, showVersion, update, uninstall, retain bool
 
 	sendTo      string
+	watch       string // --watch CHANNEL
+	once        bool
+	timeout     time.Duration
+	since       int64
 	message     string
 	attachments stringList
 
@@ -81,6 +85,10 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.uninstall, "uninstall", false, "remove this install: unlink this computer, delete its message history and keys, remove the program")
 	fs.BoolVar(&o.retain, "retain", false, "--uninstall: keep the message history and keys")
 	fs.StringVar(&o.sendTo, "send", "", "send a message to `RECIPIENT` (+E164, UUID, group ID, contact name, or 'self')")
+	fs.StringVar(&o.watch, "watch", "", "print new messages in `CHANNEL` that didn't come from this computer (e.g. 'self': what is typed on the phone)")
+	fs.BoolVar(&o.once, "once", false, "--watch: exit after the first message")
+	fs.DurationVar(&o.timeout, "timeout", 0, "--watch: give up after this long (exit status 124)")
+	fs.Int64Var(&o.since, "since", 0, "--watch: start after the message with this `ID` (from --json output) instead of now")
 	fs.StringVar(&o.message, "m", "", "message text for --send (default: read stdin)")
 	fs.Var(&o.attachments, "a", "attachment `FILE` for --send (repeatable)")
 	fs.StringVar(&o.name, "name", defaultDeviceName(), "device name shown on the phone (--link)")
@@ -104,13 +112,16 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	modes := 0
-	for _, b := range []bool{o.link, o.unlink, o.importCLI, o.daemon, o.shell, o.status, o.check, o.stop, o.showVersion, o.update, o.uninstall, o.sendTo != ""} {
+	for _, b := range []bool{o.link, o.unlink, o.importCLI, o.daemon, o.shell, o.status, o.check, o.stop, o.showVersion, o.update, o.uninstall, o.sendTo != "", o.watch != ""} {
 		if b {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return nil, errors.New("choose one of --link, --unlink, --import-signal-cli, --daemon, --shell, --send, --status, --check, --stop, --version, --update, --uninstall")
+		return nil, errors.New("choose one of --link, --unlink, --import-signal-cli, --daemon, --shell, --send, --watch, --status, --check, --stop, --version, --update, --uninstall")
+	}
+	if (o.once || o.timeout != 0 || o.since != 0) && o.watch == "" {
+		return nil, errors.New("--once, --timeout and --since go with --watch")
 	}
 	if o.retain && !o.uninstall {
 		return nil, errors.New("--retain goes with --uninstall")
@@ -188,6 +199,8 @@ func main() {
 		err = runUpdate(p)
 	case o.uninstall:
 		err = runUninstall(p, o.retain)
+	case o.watch != "":
+		err = runWatch(ctx, o, p)
 	case o.sendTo != "":
 		err = runSend(ctx, o, p)
 	case o.shell:
@@ -198,6 +211,9 @@ func main() {
 		if errors.Is(err, signalbackend.ErrNoDevice) {
 			os.Exit(exitNotLinked)
 		}
+		if errors.Is(err, errWatchTimeout) {
+			os.Exit(exitTimeout)
+		}
 		os.Exit(1)
 	}
 }
@@ -205,3 +221,6 @@ func main() {
 // exitNotLinked is the exit status of --daemon and --check when no device is
 // linked, so launchers (the VS Code extension) can offer linking.
 const exitNotLinked = 3
+
+// exitTimeout: --watch --timeout ran out, as timeout(1) reports it.
+const exitTimeout = 124

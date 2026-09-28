@@ -225,7 +225,9 @@ func (c *historyConverter) message(thread model.ThreadID, it *backuppb.ChatItem)
 	m := model.Message{
 		Thread: thread, Author: author, TS: int64(it.DateSent),
 		ExpiresIn: int64(it.GetExpiresInMs() / 1000),
-		EditedAt:  0,
+		// The phone's start, so the copy here disappears when the phone's does.
+		ExpireStart: int64(it.GetExpireStartDate()),
+		EditedAt:    0,
 	}
 	switch d := it.DirectionalDetails.(type) {
 	case *backuppb.ChatItem_Incoming:
