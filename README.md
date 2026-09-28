@@ -170,6 +170,15 @@ going across service restarts without missing messages; `--json` prints
 each message with its `id`, and `--since ID` resumes after it. `--once
 --timeout 10m` waits for a single reply (exit status 124 if none comes).
 
+AI coding agents (Claude Code, Codex and others) can learn all this from the
+[signal-headless skill](https://github.com/jaggedmountain/skills/tree/main/signal-headless),
+which also sets ground rules: they report and take instructions in Note to
+Self, and ask before messaging anyone else.
+
+```
+npx skills add jaggedmountain/skills --skill signal-headless
+```
+
 Scripts and other clients can use the service's socket directly; see
 [docs/protocol.md](docs/protocol.md), which also covers the signal-cli
 compatible `jsonRpc` mode.
