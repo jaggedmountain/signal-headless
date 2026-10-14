@@ -256,7 +256,7 @@ Linux (x86-64 and arm64), macOS (Apple Silicon and Intel) and Windows
 (x86-64). How each is built and tested:
 [CONTRIBUTING.md](CONTRIBUTING.md#platforms).
 
-## Donate
+## Volunteer Funding
 
 `signal-headless` is free and made in spare time. If it's useful, support
 helps keep it maintained: new Signal features, more platforms, fixes when
@@ -265,7 +265,7 @@ Signal changes things.
 - [GitHub Sponsors](https://github.com/sponsors/jam-on): monthly or one-time
 - [Ko-fi](https://ko-fi.com/jaggedmountain): a one-off tip, no account needed
 
-Signal itself runs on donations too:
+Signal itself runs on volunteer funding too:
 [signal.org/donate](https://signal.org/donate/).
 
 ## License
